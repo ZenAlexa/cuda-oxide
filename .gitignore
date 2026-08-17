@@ -7,6 +7,7 @@ target/
 .ltoir_arch
 *.ll
 *.bc
+*.mlir
 
 # Generated intrinsic probes are checked-in fixtures.
 !intrinsics/probes/*.ll

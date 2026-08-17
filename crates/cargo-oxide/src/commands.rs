@@ -9,7 +9,7 @@
 //! - Backend path resolved via discovery chain instead of hardcoded relative path
 //! - Workspace root resolved by walking up from CWD instead of assuming CWD
 
-use crate::backend;
+use crate::{backend, cutlass_toolchain};
 use sha2::Digest as _;
 use std::collections::BTreeMap;
 use std::fs;
@@ -25,6 +25,8 @@ const BACKEND_IDENTITY_CFG: &str = "cuda_oxide_internal_backend_identity";
 const LEGACY_CODEGEN_FINGERPRINT_CFG: &str = "cuda_oxide_internal_codegen_env";
 const LEGACY_MATERIALIZER_PROVENANCE_CFG: &str = "cuda_oxide_internal_materializer_provenance";
 const MATERIALIZER_HANDSHAKE_CACHE: &str = ".oxide-artifacts/materializer-handshake/v1.json";
+const DEVICE_BACKEND_ENV: &str = "CUDA_OXIDE_DEVICE_BACKEND";
+const CUTLASS_DIGEST_FINGERPRINT_ENV: &str = "CUDA_OXIDE_INTERNAL_CUTLASS_COMPILER_SHA256";
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 struct MaterializationMode {
@@ -3246,6 +3248,71 @@ fn inherited_process_env() -> BTreeMap<String, Vec<u8>> {
         .collect()
 }
 
+/// Include the selected CUTLASS compiler and its content identity in the
+/// semantic environment seen by Cargo.
+fn inherited_process_env_with_cutlass_compiler_identity(
+    ctx: &Context,
+) -> BTreeMap<String, Vec<u8>> {
+    let mut inherited = inherited_process_env();
+    let inherited_compiler_path =
+        std::env::var_os(cutlass_toolchain::CUTLASS_COMPILER_ENV).map(PathBuf::from);
+    augment_env_with_cutlass_compiler_identity(
+        ctx,
+        &mut inherited,
+        inherited_compiler_path.as_deref(),
+    );
+    inherited
+}
+
+fn augment_env_with_cutlass_compiler_identity(
+    ctx: &Context,
+    inherited: &mut BTreeMap<String, Vec<u8>>,
+    inherited_compiler_path: Option<&Path>,
+) {
+    let backend = inherited
+        .get(DEVICE_BACKEND_ENV)
+        .map(Vec::as_slice)
+        .or_else(|| project_config_env(ctx, DEVICE_BACKEND_ENV).map(str::as_bytes));
+    if !backend.is_some_and(selector_is_cutlass_mlir) {
+        return;
+    }
+
+    let explicit_compiler = if inherited.contains_key(cutlass_toolchain::CUTLASS_COMPILER_ENV) {
+        inherited_compiler_path.map(Path::to_path_buf)
+    } else {
+        project_config_env(ctx, cutlass_toolchain::CUTLASS_COMPILER_ENV).map(PathBuf::from)
+    };
+    if inherited.contains_key(cutlass_toolchain::CUTLASS_COMPILER_ENV)
+        || explicit_compiler.is_some()
+    {
+        let digest = match explicit_compiler.as_deref() {
+            Some(path) => cutlass_toolchain::sha256_file(path)
+                .unwrap_or_else(|error| format!("unavailable:{error}")),
+            None => "unavailable:non-unicode inherited compiler path".to_string(),
+        };
+        inherited.insert(
+            CUTLASS_DIGEST_FINGERPRINT_ENV.to_string(),
+            digest.into_bytes(),
+        );
+        return;
+    }
+
+    if let Ok(Some(paths)) = cutlass_toolchain::resolve_official() {
+        inherited.insert(
+            cutlass_toolchain::CUTLASS_COMPILER_ENV.to_string(),
+            paths
+                .compiler_library
+                .as_os_str()
+                .as_encoded_bytes()
+                .to_vec(),
+        );
+        inherited.insert(
+            CUTLASS_DIGEST_FINGERPRINT_ENV.to_string(),
+            paths.compiler_library_sha256.as_bytes().to_vec(),
+        );
+    }
+}
+
 fn passthrough_codegen_fingerprint(
     ctx: &Context,
     opts: &CargoPassthroughOptions<'_>,
@@ -3259,7 +3326,7 @@ fn passthrough_codegen_fingerprint(
         owner_filter,
         target_arch,
         materialization,
-        &inherited_process_env(),
+        &inherited_process_env_with_cutlass_compiler_identity(ctx),
     )
 }
 
@@ -3391,7 +3458,7 @@ fn sanitize_codegen_fingerprint(
         detected_device_arch,
         ptx_dir,
         materialization,
-        &inherited_process_env(),
+        &inherited_process_env_with_cutlass_compiler_identity(ctx),
     )
 }
 
@@ -6104,6 +6171,65 @@ fn apply_config_env(cmd: &mut Command, ctx: &Context) {
             cmd.env(key, value);
         }
     }
+    apply_managed_cutlass_compiler(cmd, ctx);
+}
+
+fn apply_managed_cutlass_compiler(cmd: &mut Command, ctx: &Context) {
+    let backend = std::env::var_os(DEVICE_BACKEND_ENV)
+        .map(|value| value.as_encoded_bytes().to_vec())
+        .or_else(|| {
+            project_config_env(ctx, DEVICE_BACKEND_ENV).map(|value| value.as_bytes().to_vec())
+        });
+    if !backend.as_deref().is_some_and(selector_is_cutlass_mlir) {
+        return;
+    }
+
+    let explicitly_configured = std::env::var_os(cutlass_toolchain::CUTLASS_COMPILER_ENV).is_some()
+        || project_config_env(ctx, cutlass_toolchain::CUTLASS_COMPILER_ENV).is_some();
+    if explicitly_configured {
+        return;
+    }
+
+    match cutlass_toolchain::resolve_official() {
+        Ok(Some(paths)) => apply_resolved_cutlass_compiler(cmd, Some(&paths), false),
+        Ok(None) => {
+            eprintln!(
+                "Error: CUDA_OXIDE_DEVICE_BACKEND=cutlass-mlir needs the managed CUTLASS compiler"
+            );
+            eprintln!("Install the pinned official release with:");
+            eprintln!("  cargo oxide toolchain install cutlass");
+            eprintln!(
+                "Or explicitly set {}.",
+                cutlass_toolchain::CUTLASS_COMPILER_ENV
+            );
+            std::process::exit(2);
+        }
+        Err(error) => {
+            eprintln!("Error: managed CUTLASS compiler installation is invalid: {error}");
+            eprintln!("Repair it with `cargo oxide toolchain install cutlass`.");
+            std::process::exit(2);
+        }
+    }
+}
+
+fn selector_is_cutlass_mlir(value: &[u8]) -> bool {
+    std::str::from_utf8(value).is_ok_and(|value| value.trim() == "cutlass-mlir")
+}
+
+fn apply_resolved_cutlass_compiler(
+    cmd: &mut Command,
+    resolved: Option<&cutlass_toolchain::ResolvedCutlass>,
+    explicitly_configured: bool,
+) {
+    if explicitly_configured {
+        return;
+    }
+    if let Some(paths) = resolved {
+        cmd.env(
+            cutlass_toolchain::CUTLASS_COMPILER_ENV,
+            &paths.compiler_library,
+        );
+    }
 }
 
 fn apply_common_codegen_env(
@@ -7028,6 +7154,40 @@ mod tests {
             && value
                 .bytes()
                 .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    }
+
+    #[test]
+    fn managed_cutlass_compiler_sets_only_the_library_env() {
+        let resolved = cutlass_toolchain::ResolvedCutlass {
+            install_dir: PathBuf::from("/managed/cutlass"),
+            compiler_library: PathBuf::from("/managed/cutlass/lib/libCutlassCompiler.so"),
+            compiler_library_sha256: "fixture-digest".into(),
+        };
+        let mut cmd = Command::new("cargo");
+        apply_resolved_cutlass_compiler(&mut cmd, Some(&resolved), false);
+        assert_eq!(
+            command_env(&cmd, cutlass_toolchain::CUTLASS_COMPILER_ENV).as_deref(),
+            Some("/managed/cutlass/lib/libCutlassCompiler.so")
+        );
+    }
+
+    #[test]
+    fn explicit_cutlass_compiler_outranks_managed_resolution() {
+        let resolved = cutlass_toolchain::ResolvedCutlass {
+            install_dir: PathBuf::from("/managed/cutlass"),
+            compiler_library: PathBuf::from("/managed/cutlass/lib/libCutlassCompiler.so"),
+            compiler_library_sha256: "fixture-digest".into(),
+        };
+        let mut cmd = Command::new("cargo");
+        cmd.env(
+            cutlass_toolchain::CUTLASS_COMPILER_ENV,
+            "/explicit/libCutlassCompiler.so",
+        );
+        apply_resolved_cutlass_compiler(&mut cmd, Some(&resolved), true);
+        assert_eq!(
+            command_env(&cmd, cutlass_toolchain::CUTLASS_COMPILER_ENV).as_deref(),
+            Some("/explicit/libCutlassCompiler.so")
+        );
     }
 
     /// `cargo_passthrough_command` with an empty ambient
@@ -9282,6 +9442,100 @@ device-owner = { path = "../device-owner" }
             ),
             "exact CUDA-tool provenance must change Cargo's rustc fingerprint"
         );
+    }
+
+    #[test]
+    fn passthrough_fingerprint_tracks_the_managed_cutlass_library_digest() {
+        let ctx = test_context(OxideConfig::default());
+        let opts = CargoPassthroughOptions {
+            verbose: false,
+            emit_nvvm_ir: false,
+            arch: Some("sm_120a"),
+            features: None,
+            cargo_target_dir: None,
+            device_codegen_crate: None,
+            device_cfgs: &[],
+            no_fmad: false,
+            unchecked_indexing: false,
+            materialize_cubin: false,
+            device_debug: DeviceDebug::Off,
+        };
+        let mut environment = BTreeMap::from([
+            (DEVICE_BACKEND_ENV.to_owned(), b"cutlass-mlir".to_vec()),
+            (
+                cutlass_toolchain::CUTLASS_COMPILER_ENV.to_owned(),
+                b"/managed/libCutlassCompiler.so".to_vec(),
+            ),
+            (
+                CUTLASS_DIGEST_FINGERPRINT_ENV.to_owned(),
+                b"digest-a".to_vec(),
+            ),
+        ]);
+        let fingerprint = |environment: &BTreeMap<String, Vec<u8>>| {
+            passthrough_codegen_fingerprint_with_env(
+                &ctx,
+                &opts,
+                None,
+                Some("sm_120a"),
+                &MaterializationMode::default(),
+                environment,
+            )
+        };
+        let before = fingerprint(&environment);
+        environment.insert(
+            CUTLASS_DIGEST_FINGERPRINT_ENV.to_owned(),
+            b"digest-b".to_vec(),
+        );
+
+        assert_ne!(before, fingerprint(&environment));
+    }
+
+    #[test]
+    fn passthrough_fingerprint_tracks_explicit_cutlass_library_content() {
+        let root = unique_temp_dir("cargo_oxide_explicit_cutlass_fingerprint");
+        fs::create_dir_all(&root).unwrap();
+        let compiler = root.join("libCutlassCompiler.so");
+        fs::write(&compiler, b"compiler-a").unwrap();
+
+        let ctx = test_context(OxideConfig::default());
+        let opts = CargoPassthroughOptions {
+            verbose: false,
+            emit_nvvm_ir: false,
+            arch: Some("sm_120a"),
+            features: None,
+            cargo_target_dir: None,
+            device_codegen_crate: None,
+            device_cfgs: &[],
+            no_fmad: false,
+            unchecked_indexing: false,
+            materialize_cubin: false,
+            device_debug: DeviceDebug::Off,
+        };
+        let base_environment = BTreeMap::from([
+            (DEVICE_BACKEND_ENV.to_owned(), b"cutlass-mlir".to_vec()),
+            (
+                cutlass_toolchain::CUTLASS_COMPILER_ENV.to_owned(),
+                compiler.as_os_str().as_encoded_bytes().to_vec(),
+            ),
+        ]);
+        let fingerprint = |environment: &mut BTreeMap<String, Vec<u8>>| {
+            augment_env_with_cutlass_compiler_identity(&ctx, environment, Some(compiler.as_path()));
+            passthrough_codegen_fingerprint_with_env(
+                &ctx,
+                &opts,
+                None,
+                Some("sm_120a"),
+                &MaterializationMode::default(),
+                environment,
+            )
+        };
+
+        let before = fingerprint(&mut base_environment.clone());
+        fs::write(&compiler, b"compiler-b").unwrap();
+        let after = fingerprint(&mut base_environment.clone());
+        fs::remove_dir_all(&root).unwrap();
+
+        assert_ne!(before, after, "same-path compiler replacement must rebuild");
     }
 
     #[test]
