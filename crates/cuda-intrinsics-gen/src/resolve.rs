@@ -16986,9 +16986,11 @@ fn packed_conversion_recipe(
 ) -> Option<PackedConversionRecipe> {
     match conversion.source_format {
         PackedConversionSourceFormat::F32x2 => packed_conversion_recipe_f32x2(conversion),
-        PackedConversionSourceFormat::E4m3x2
+        PackedConversionSourceFormat::E2m1x2
+        | PackedConversionSourceFormat::E4m3x2
         | PackedConversionSourceFormat::E5m2x2
-        | PackedConversionSourceFormat::F16x2 => packed_conversion_recipe_fp8_f16x2(conversion),
+        | PackedConversionSourceFormat::F16x2
+        | PackedConversionSourceFormat::Ue8m0x2 => packed_conversion_recipe_fp8_f16x2(conversion),
     }
 }
 
@@ -17006,6 +17008,42 @@ fn packed_conversion_recipe_fp8_f16x2(
         conversion.rounding,
         conversion.saturation,
     ) {
+        (
+            PackedConversionSourceFormat::E2m1x2,
+            PackedConversionDestinationFormat::F16x2,
+            PackedConversionRounding::NearestEven,
+            PackedConversionSaturation::None,
+        ) => Some(PackedConversionRecipe {
+            id: "cvt_rn_f16x2_e2m1x2",
+            abi_id: "i1003",
+            operation_key: "packed.convert.e2m1x2.f16x2.nearest_even",
+            rust_name: "cvt_rn_f16x2_e2m1x2",
+            compatibility_path: "cuda_device::convert::cvt_rn_f16x2_e2m1x2",
+            dialect_op_type: "CvtRnF16x2E2m1x2Op",
+            dialect_op_name: "nvvm.cvt_rn_f16x2_e2m1x2",
+            source_record: "int_nvvm_e2m1x2_to_f16x2_rn",
+            llvm_symbol: "llvm.nvvm.e2m1x2.to.f16x2.rn",
+            llvm_result: "v2f16",
+            summary: "Converts two packed e2m1 values from the low byte to packed f16x2.",
+        }),
+        (
+            PackedConversionSourceFormat::Ue8m0x2,
+            PackedConversionDestinationFormat::Bf16x2,
+            PackedConversionRounding::NearestEven,
+            PackedConversionSaturation::None,
+        ) => Some(PackedConversionRecipe {
+            id: "cvt_rn_bf16x2_ue8m0x2",
+            abi_id: "i1004",
+            operation_key: "packed.convert.ue8m0x2.bf16x2.nearest_even",
+            rust_name: "cvt_rn_bf16x2_ue8m0x2",
+            compatibility_path: "cuda_device::convert::cvt_rn_bf16x2_ue8m0x2",
+            dialect_op_type: "CvtRnBf16x2Ue8m0x2Op",
+            dialect_op_name: "nvvm.cvt_rn_bf16x2_ue8m0x2",
+            source_record: "int_nvvm_ue8m0x2_to_bf16x2",
+            llvm_symbol: "llvm.nvvm.ue8m0x2.to.bf16x2",
+            llvm_result: "v2bf16",
+            summary: "Converts two packed unsigned e8m0 scale values to packed bf16x2.",
+        }),
         (
             PackedConversionSourceFormat::F16x2,
             PackedConversionDestinationFormat::E4m3x2,
@@ -17386,7 +17424,10 @@ fn packed_conversion_source_types(
         PackedConversionSourceFormat::F16x2 => {
             (vec!["u32".into()], vec!["i32".into()], vec!["v2f16".into()])
         }
-        PackedConversionSourceFormat::E4m3x2 | PackedConversionSourceFormat::E5m2x2 => {
+        PackedConversionSourceFormat::E2m1x2
+        | PackedConversionSourceFormat::E4m3x2
+        | PackedConversionSourceFormat::E5m2x2
+        | PackedConversionSourceFormat::Ue8m0x2 => {
             (vec!["u16".into()], vec!["i16".into()], vec!["i16".into()])
         }
     }
@@ -17401,19 +17442,36 @@ fn packed_conversion_result_width(conversion: &crate::model::PackedConversion) -
 
 fn packed_conversion_floor(
     conversion: &crate::model::PackedConversion,
-) -> (&'static str, &'static str) {
+) -> (&'static str, Option<&'static str>) {
+    if matches!(
+        conversion.source_format,
+        PackedConversionSourceFormat::E2m1x2 | PackedConversionSourceFormat::Ue8m0x2
+    ) {
+        return ("8.7", None);
+    }
     // FP8 on either side carries the Ada floor, including when FP8 is the
     // source and the destination is the older `f16x2`.
     if packed_conversion_uses_fp8(conversion) {
-        return ("8.1", "sm_89");
+        return ("8.1", Some("sm_89"));
     }
     match conversion.destination_format {
         PackedConversionDestinationFormat::Bf16x2 | PackedConversionDestinationFormat::F16x2 => {
-            ("7.0", "sm_80")
+            ("7.0", Some("sm_80"))
         }
         PackedConversionDestinationFormat::E4m3x2 | PackedConversionDestinationFormat::E5m2x2 => {
-            ("8.1", "sm_89")
+            ("8.1", Some("sm_89"))
         }
+    }
+}
+
+fn packed_conversion_targets(conversion: &crate::model::PackedConversion) -> &'static str {
+    if matches!(
+        conversion.source_format,
+        PackedConversionSourceFormat::E2m1x2 | PackedConversionSourceFormat::Ue8m0x2
+    ) {
+        "sm_120a"
+    } else {
+        "all"
     }
 }
 
@@ -17650,9 +17708,9 @@ fn packed_conversion_overlay_record(
         convergent: false,
         execution_scope: "thread".into(),
         minimum_ptx: minimum_ptx.into(),
-        minimum_sm: Some(minimum_sm.into()),
+        minimum_sm: minimum_sm.map(Into::into),
         ptx_result: rust_result,
-        targets: "all".into(),
+        targets: packed_conversion_targets(&conversion).into(),
         ptx_isa_version: "9.3".into(),
         ptx_isa_section: "9.7.9.22 Data Movement and Conversion Instructions: cvt".into(),
         ptx_isa_url: "https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-cvt".into(),
@@ -17666,9 +17724,10 @@ fn packed_conversion_overlay_record(
             backend,
             mechanism: packed_conversion_backend_mechanism(&conversion, backend),
             evidence_profile: evidence_profile.into(),
-            targets: None,
+            targets: (packed_conversion_targets(&conversion) != "all")
+                .then(|| packed_conversion_targets(&conversion).into()),
             minimum_ptx: Some(minimum_ptx.into()),
-            minimum_sm: Some(minimum_sm.into()),
+            minimum_sm: minimum_sm.map(Into::into),
         })
         .collect(),
         packed_atomic: None,
@@ -17733,9 +17792,11 @@ fn validate_packed_conversion_policy(
     // packed operand is forwarded unchanged.
     let expected_adapter = match conversion.source_format {
         PackedConversionSourceFormat::F32x2 => PackedConversionAdapter::ReverseHighLowOperands,
+        PackedConversionSourceFormat::E2m1x2 => PackedConversionAdapter::LowByteFromU16,
         PackedConversionSourceFormat::E4m3x2
         | PackedConversionSourceFormat::E5m2x2
-        | PackedConversionSourceFormat::F16x2 => PackedConversionAdapter::Identity,
+        | PackedConversionSourceFormat::F16x2
+        | PackedConversionSourceFormat::Ue8m0x2 => PackedConversionAdapter::Identity,
     };
     ensure!(
         conversion.adapter == expected_adapter,
@@ -17807,9 +17868,9 @@ fn validate_packed_conversion_policy(
             && !policy.convergent
             && policy.execution_scope == "thread"
             && policy.minimum_ptx == minimum_ptx
-            && policy.minimum_sm.as_deref() == Some(minimum_sm)
+            && policy.minimum_sm.as_deref() == minimum_sm
             && policy.ptx_result == rust_result
-            && policy.targets == "all"
+            && policy.targets == packed_conversion_targets(conversion)
             && policy.ptx_isa_version == "9.3"
             && policy.ptx_isa_section == "9.7.9.22 Data Movement and Conversion Instructions: cvt"
             && policy.ptx_isa_url
@@ -17859,7 +17920,10 @@ fn validate_packed_conversion_policy(
     for lowering in &policy.backend_lowerings {
         ensure!(
             lowering.minimum_ptx.as_deref() == Some(minimum_ptx)
-                && lowering.minimum_sm.as_deref() == Some(minimum_sm)
+                && lowering.minimum_sm.as_deref() == minimum_sm
+                && lowering.targets.as_deref()
+                    == (packed_conversion_targets(conversion) != "all")
+                        .then(|| packed_conversion_targets(conversion))
                 && !lowering.evidence_profile.trim().is_empty(),
             "{} backend {:?} does not carry its exact packed-conversion floor",
             policy.id,
@@ -21622,8 +21686,26 @@ fn is_sparse_f8f6f4_f16_policy(policy: &OverlayIntrinsic) -> bool {
         })
 }
 
+fn is_packed_mxf4_register_mma_policy(policy: &OverlayIntrinsic) -> bool {
+    policy.family == "register_mma"
+        && policy.targets == REGISTER_MMA_F8F6F4_TARGETS
+        && policy.register_mma.as_ref().is_some_and(|mma| {
+            mma.kind == Some(RegisterMmaKind::Mxf4)
+                && mma.shape == RegisterMmaShape::M16n8k64
+                && mma.operation == RegisterMmaOperation::Multiply
+                && mma.accumulator == RegisterMmaAccumulator::F32
+                && mma.a_element == RegisterMmaElement::E2m1
+                && mma.b_element == RegisterMmaElement::E2m1
+                && mma.a_layout == RegisterMmaLayout::Row
+                && mma.b_layout == RegisterMmaLayout::Col
+                && mma.overflow == RegisterMmaOverflow::NotApplicable
+        })
+}
+
 fn is_f8f6f4_mma_target_matrix_policy(policy: &OverlayIntrinsic) -> bool {
-    is_dense_f8f6f4_register_mma_policy(policy) || is_sparse_f8f6f4_f16_policy(policy)
+    is_dense_f8f6f4_register_mma_policy(policy)
+        || is_sparse_f8f6f4_f16_policy(policy)
+        || is_packed_mxf4_register_mma_policy(policy)
 }
 
 #[derive(Clone, Copy)]
@@ -23716,6 +23798,9 @@ fn validate_register_mma_policy(
         Some(RegisterMmaKind::F8f6f4) => {
             return validate_register_mma_f8f6f4_policy(policy, declaration, mma);
         }
+        Some(RegisterMmaKind::Mxf4) => {
+            return validate_register_mma_mxf4_policy(policy, declaration, mma);
+        }
         Some(RegisterMmaKind::Mxf8f6f4) => {
             return validate_register_mma_mxf8f6f4_policy(policy, declaration, mma);
         }
@@ -24240,6 +24325,180 @@ fn validate_register_mma_f8f6f4_policy(
         policy.id
     );
     ensure_no_other_family_contract(policy, "dense f8f6f4 register MMA")?;
+    Ok(())
+}
+
+fn validate_register_mma_mxf4_policy(
+    policy: &OverlayIntrinsic,
+    declaration: &ImportedIntrinsic,
+    mma: &RegisterMma,
+) -> Result<()> {
+    const ID: &str = "mma_m16n8k64_mxf4_scale_2x_f32_e2m1_e2m1";
+    const SOURCE_RECORD: &str =
+        "int_nvvm_mma_block_scale_m16n8k64_row_col_mxf4_scale_2x_f32_e2m1_e2m1_f32_ue8m0";
+    const LLVM_SYMBOL: &str =
+        "llvm.nvvm.mma.block.scale.m16n8k64.row.col.mxf4.scale.2x.f32.e2m1.e2m1.f32.ue8m0";
+    let rust_arguments = [
+        "[f32; 4]", "[u32; 4]", "[u32; 2]", "u32", "u16", "u16", "u32", "u16", "u16",
+    ];
+    let dialect_operands = [
+        "f32", "f32", "f32", "f32", "i32", "i32", "i32", "i32", "i32", "i32", "i32", "i16", "i16",
+        "i32", "i16", "i16",
+    ];
+    let llvm_arguments = [
+        "i32", "i32", "i32", "i32", "i32", "i32", "f32", "f32", "f32", "f32", "i32", "i16", "i16",
+        "i32", "i16", "i16",
+    ];
+    let results = ["f32", "f32", "f32", "f32"];
+    ensure!(
+        policy.id == ID
+            && policy.abi_id == "i1005"
+            && policy.operation_key
+                == "matrix.mma.m16n8k64.row.col.kind_mxf4.scale_vec_2x.f32.e2m1.e2m1.f32.ue8m0"
+            && policy.source.is_none()
+            && policy.source_record.as_deref() == Some(SOURCE_RECORD)
+            && policy.llvm_symbol.as_deref() == Some(LLVM_SYMBOL)
+            && policy.resolved_llvm_symbol.is_none(),
+        "{} packed mxf4 MMA identity changed",
+        policy.id
+    );
+    ensure!(
+        policy.rust_module == "matrix"
+            && policy.rust_name == ID
+            && policy.rust_arguments == rust_arguments
+            && policy.rust_result == "[f32; 4]"
+            && !policy.safe
+            && policy.must_use
+            && policy.safe_allowlist_reason.is_none()
+            && policy.public_rust_path == format!("cuda_intrinsics::matrix::{ID}")
+            && policy.compatibility_rust_paths == [format!("cuda_device::wmma::{ID}")],
+        "{} must preserve the unsafe must-use packed mxf4 API",
+        policy.id
+    );
+    ensure!(
+        policy.dialect_op_type == "RegisterMmaOp"
+            && policy.dialect_op_name == "nvvm.register_mma"
+            && policy.dialect_operands == dialect_operands
+            && policy.dialect_results == results
+            && policy.llvm_arguments == llvm_arguments
+            && policy.llvm_results == results
+            && policy.ptx_result == "[f32; 4]"
+            && mma.shape == RegisterMmaShape::M16n8k64
+            && mma.kind == Some(RegisterMmaKind::Mxf4)
+            && mma.operation == RegisterMmaOperation::Multiply
+            && mma.accumulator == RegisterMmaAccumulator::F32
+            && mma.a_element == RegisterMmaElement::E2m1
+            && mma.b_element == RegisterMmaElement::E2m1
+            && mma.a_layout == RegisterMmaLayout::Row
+            && mma.b_layout == RegisterMmaLayout::Col
+            && mma.overflow == RegisterMmaOverflow::NotApplicable
+            && mma.participation
+                == RegisterMmaParticipation::AllWarpLanesSameInstructionAndQualifiersNoExitedLanes
+            && mma.adapter == RegisterMmaAdapter::C4F32A4U32B2U32Scales2U32Selectors4U16ToD4F32
+            && mma.compatibility_source == RegisterMmaCompatibilitySource::GeneratedStub
+            && mma.runtime_validation == RuntimeValidation::Unexecuted
+            && policy.lowering == "generated_register_mma",
+        "{} packed mxf4 MMA carrier or lowering changed",
+        policy.id
+    );
+    ensure!(
+        !policy.pure
+            && policy.memory == "none"
+            && policy.convergent
+            && policy.execution_scope == "warp"
+            && policy.minimum_ptx == "8.7"
+            && policy.minimum_sm.is_none()
+            && policy.targets == REGISTER_MMA_F8F6F4_TARGETS,
+        "{} packed mxf4 effects or exact target set changed",
+        policy.id
+    );
+    ensure!(
+        policy.ptx_isa_version == "9.3"
+            && policy.ptx_isa_section == "9.7.15.5.14 Multiply-and-Accumulate Instruction: mma"
+            && policy.ptx_isa_url
+                == "https://docs.nvidia.com/cuda/parallel-thread-execution/#warp-level-matrix-instructions-mma",
+        "{} packed mxf4 PTX provenance changed",
+        policy.id
+    );
+    let [selection] = declaration.selections.as_slice() else {
+        bail!(
+            "{} must retain exactly one imported packed mxf4 instruction selection",
+            policy.id
+        );
+    };
+    ensure!(
+        declaration.classes == ["SDPatternOperator", "Intrinsic", "NVVM_MMA_BLOCK_SCALE"]
+            && declaration.properties == ["IntrNoCallback", "IntrNoMem"]
+            && selection_matches_policy(policy, selection)?
+            && selection.predicates == ["Subtarget->hasMMABlockScale()"]
+            && selection.constraints.is_empty(),
+        "{} imported packed mxf4 declaration or selection changed",
+        policy.id
+    );
+    ensure!(
+        policy.expected_ptx
+            == InstructionPattern {
+                mnemonic: "mma".into(),
+                modifiers: [
+                    "sync",
+                    "aligned",
+                    "m16n8k64",
+                    "row",
+                    "col",
+                    "kind::mxf4",
+                    "block_scale",
+                    "scale_vec::2X",
+                    "f32",
+                    "e2m1",
+                    "e2m1",
+                    "f32",
+                    "ue8m0",
+                ]
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+                operands: vec![
+                    OperandPattern::RegisterList { length: 4 },
+                    OperandPattern::RegisterList { length: 4 },
+                    OperandPattern::RegisterList { length: 2 },
+                    OperandPattern::RegisterList { length: 4 },
+                    OperandPattern::Register,
+                    OperandPattern::RegisterList { length: 2 },
+                    OperandPattern::Register,
+                    OperandPattern::RegisterList { length: 2 },
+                ],
+            },
+        "{} expected packed mxf4 PTX changed",
+        policy.id
+    );
+    let backend_pairs: BTreeSet<_> = policy
+        .backend_lowerings
+        .iter()
+        .map(|lowering| (lowering.backend, lowering.mechanism))
+        .collect();
+    ensure!(
+        policy.backend_lowerings.len() == 2
+            && backend_pairs
+                == BTreeSet::from([
+                    (
+                        IntrinsicBackend::LlvmNvptx,
+                        BackendLoweringMechanism::InlinePtx,
+                    ),
+                    (
+                        IntrinsicBackend::LibNvvm,
+                        BackendLoweringMechanism::InlinePtx,
+                    ),
+                ])
+            && policy.backend_lowerings.iter().all(|lowering| {
+                lowering.targets.is_none()
+                    && lowering.minimum_ptx.is_none()
+                    && lowering.minimum_sm.is_none()
+                    && !lowering.evidence_profile.trim().is_empty()
+            }),
+        "{} must inherit the exact reviewed target set on both inline-PTX routes",
+        policy.id
+    );
+    ensure_no_other_family_contract(policy, "packed mxf4 register MMA")?;
     Ok(())
 }
 
@@ -30460,7 +30719,7 @@ mod tests {
         record.execution_scope = "thread".into();
         let (minimum_ptx, minimum_sm) = packed_conversion_floor(&conversion);
         record.minimum_ptx = minimum_ptx.into();
-        record.minimum_sm = Some(minimum_sm.into());
+        record.minimum_sm = minimum_sm.map(Into::into);
         record.ptx_result = format!("u{result_width}");
         record.ptx_isa_section = "9.7.9.22 Data Movement and Conversion Instructions: cvt".into();
         record.ptx_isa_url = "https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-cvt".into();
@@ -30473,7 +30732,7 @@ mod tests {
                 evidence_profile: "test".into(),
                 targets: None,
                 minimum_ptx: Some(minimum_ptx.into()),
-                minimum_sm: Some(minimum_sm.into()),
+                minimum_sm: minimum_sm.map(Into::into),
             })
             .collect();
         let modifiers = packed_conversion_ptx_modifiers(&conversion);
@@ -31300,8 +31559,8 @@ mod tests {
         let (overlay, hash) =
             read_overlay(&repo_root, &repo_root.join("intrinsics/overlay.toml")).unwrap();
         assert_eq!(overlay.schema, OVERLAY_SCHEMA);
-        assert_eq!(overlay.shards.len(), 64);
-        assert_eq!(overlay.intrinsics.len(), 1002);
+        assert_eq!(overlay.shards.len(), 66);
+        assert_eq!(overlay.intrinsics.len(), 1005);
         assert_eq!(
             overlay
                 .intrinsics
@@ -31356,7 +31615,7 @@ mod tests {
                 .iter()
                 .filter(|record| record.family == "packed_conversion")
                 .count(),
-            18
+            20
         );
         assert_eq!(
             overlay
@@ -31388,7 +31647,7 @@ mod tests {
                 .iter()
                 .filter(|record| record.family == "register_mma")
                 .count(),
-            154
+            155
         );
         assert_eq!(
             overlay
@@ -36343,7 +36602,7 @@ scope = "system"
             .iter()
             .filter(|record| record.family == "register_mma")
             .collect();
-        assert_eq!(records.len(), 154);
+        assert_eq!(records.len(), 155);
 
         let dense_f8f6f4_records = records
             .iter()
@@ -36424,6 +36683,54 @@ scope = "system"
                     .iter()
                     .any(|modifier| modifier == "kind::mxf8f6f4")
         }));
+
+        let mxf4_records = records
+            .iter()
+            .copied()
+            .filter(|record| {
+                record
+                    .register_mma
+                    .as_ref()
+                    .is_some_and(|mma| mma.kind == Some(RegisterMmaKind::Mxf4))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(mxf4_records.len(), 1);
+        let mxf4 = mxf4_records[0];
+        let mxf4_mma = mxf4.register_mma.as_ref().unwrap();
+        assert_eq!(mxf4.abi_id, "i1005");
+        assert_eq!(mxf4_mma.shape, RegisterMmaShape::M16n8k64);
+        assert_eq!(mxf4_mma.a_element, RegisterMmaElement::E2m1);
+        assert_eq!(mxf4_mma.b_element, RegisterMmaElement::E2m1);
+        assert_eq!(mxf4.minimum_ptx, "8.7");
+        assert!(mxf4.minimum_sm.is_none());
+        assert_eq!(mxf4.targets, REGISTER_MMA_F8F6F4_TARGETS);
+        assert!(
+            mxf4.expected_ptx
+                .modifiers
+                .iter()
+                .any(|modifier| modifier == "kind::mxf4")
+        );
+        assert!(
+            mxf4.expected_ptx
+                .modifiers
+                .iter()
+                .any(|modifier| modifier == "scale_vec::2X")
+        );
+        let mxf4_declaration = declarations[mxf4.source_record.as_deref().unwrap()];
+        validate_register_mma_policy(mxf4, mxf4_declaration).unwrap();
+
+        let mut wrong_scale_vec = mxf4.clone();
+        *wrong_scale_vec
+            .expected_ptx
+            .modifiers
+            .iter_mut()
+            .find(|modifier| modifier.as_str() == "scale_vec::2X")
+            .unwrap() = "scale_vec::1X".into();
+        assert!(validate_register_mma_policy(&wrong_scale_vec, mxf4_declaration).is_err());
+
+        let mut wrong_kind = mxf4.clone();
+        wrong_kind.register_mma.as_mut().unwrap().kind = Some(RegisterMmaKind::Mxf8f6f4);
+        assert!(validate_register_mma_policy(&wrong_kind, mxf4_declaration).is_err());
 
         let integer_records: Vec<_> = records
             .iter()
@@ -40886,7 +41193,7 @@ scope = "system"
             .iter()
             .filter(|record| record.family == "packed_conversion")
             .collect();
-        assert_eq!(packed.len(), 18);
+        assert_eq!(packed.len(), 20);
         for policy in packed {
             let source = resolve_policy_source(policy).unwrap();
             let declaration = policy

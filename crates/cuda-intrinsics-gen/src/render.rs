@@ -3843,7 +3843,10 @@ fn packed_conversion_is_closed_recipe(conversion: &crate::model::PackedConversio
     let adapter_matches = conversion.adapter
         == match conversion.source_format {
             Src::F32x2 => PackedConversionAdapter::ReverseHighLowOperands,
-            Src::E4m3x2 | Src::E5m2x2 | Src::F16x2 => PackedConversionAdapter::Identity,
+            Src::E2m1x2 => PackedConversionAdapter::LowByteFromU16,
+            Src::E4m3x2 | Src::E5m2x2 | Src::F16x2 | Src::Ue8m0x2 => {
+                PackedConversionAdapter::Identity
+            }
         };
 
     adapter_matches
@@ -3892,6 +3895,8 @@ fn packed_conversion_is_closed_recipe(conversion: &crate::model::PackedConversio
                 | (Src::E4m3x2, Dst::F16x2, Round::NearestEven, Sat::Relu)
                 | (Src::E5m2x2, Dst::F16x2, Round::NearestEven, Sat::None)
                 | (Src::E5m2x2, Dst::F16x2, Round::NearestEven, Sat::Relu)
+                | (Src::E2m1x2, Dst::F16x2, Round::NearestEven, Sat::None)
+                | (Src::Ue8m0x2, Dst::Bf16x2, Round::NearestEven, Sat::None)
         )
 }
 
@@ -3907,7 +3912,10 @@ fn packed_conversion_source(record: &CatalogIntrinsic) -> PackedConversionSource
 fn packed_conversion_source_width(record: &CatalogIntrinsic) -> u32 {
     match packed_conversion_source(record) {
         PackedConversionSourceFormat::F16x2 => 32,
-        PackedConversionSourceFormat::E4m3x2 | PackedConversionSourceFormat::E5m2x2 => 16,
+        PackedConversionSourceFormat::E2m1x2
+        | PackedConversionSourceFormat::E4m3x2
+        | PackedConversionSourceFormat::E5m2x2
+        | PackedConversionSourceFormat::Ue8m0x2 => 16,
         PackedConversionSourceFormat::F32x2 => {
             unreachable!("f32x2 conversions do not have a single packed source")
         }
@@ -3919,7 +3927,10 @@ fn packed_conversion_rust_arguments(record: &CatalogIntrinsic) -> Vec<&'static s
     match packed_conversion_source(record) {
         PackedConversionSourceFormat::F32x2 => vec!["f32", "f32"],
         PackedConversionSourceFormat::F16x2 => vec!["u32"],
-        PackedConversionSourceFormat::E4m3x2 | PackedConversionSourceFormat::E5m2x2 => vec!["u16"],
+        PackedConversionSourceFormat::E2m1x2
+        | PackedConversionSourceFormat::E4m3x2
+        | PackedConversionSourceFormat::E5m2x2
+        | PackedConversionSourceFormat::Ue8m0x2 => vec!["u16"],
     }
 }
 
@@ -3928,7 +3939,10 @@ fn packed_conversion_dialect_operands(record: &CatalogIntrinsic) -> Vec<&'static
     match packed_conversion_source(record) {
         PackedConversionSourceFormat::F32x2 => vec!["f32", "f32"],
         PackedConversionSourceFormat::F16x2 => vec!["i32"],
-        PackedConversionSourceFormat::E4m3x2 | PackedConversionSourceFormat::E5m2x2 => vec!["i16"],
+        PackedConversionSourceFormat::E2m1x2
+        | PackedConversionSourceFormat::E4m3x2
+        | PackedConversionSourceFormat::E5m2x2
+        | PackedConversionSourceFormat::Ue8m0x2 => vec!["i16"],
     }
 }
 
@@ -3970,7 +3984,13 @@ fn packed_conversion_constraint(record: &CatalogIntrinsic) -> &'static str {
         (16, PackedConversionSourceFormat::F32x2) => "=h,f,f",
         (32, PackedConversionSourceFormat::F32x2) => "=r,f,f",
         (16, PackedConversionSourceFormat::F16x2) => "=h,r",
-        (32, PackedConversionSourceFormat::E4m3x2 | PackedConversionSourceFormat::E5m2x2) => "=r,h",
+        (
+            32,
+            PackedConversionSourceFormat::E2m1x2
+            | PackedConversionSourceFormat::E4m3x2
+            | PackedConversionSourceFormat::E5m2x2
+            | PackedConversionSourceFormat::Ue8m0x2,
+        ) => "=r,h",
         _ => unreachable!("closed packed-conversion result width and source format"),
     }
 }
@@ -4019,9 +4039,11 @@ fn packed_conversion_ptx_mnemonic(record: &CatalogIntrinsic) -> String {
         conversion.adapter,
         match conversion.source_format {
             PackedConversionSourceFormat::F32x2 => PackedConversionAdapter::ReverseHighLowOperands,
+            PackedConversionSourceFormat::E2m1x2 => PackedConversionAdapter::LowByteFromU16,
             PackedConversionSourceFormat::E4m3x2
             | PackedConversionSourceFormat::E5m2x2
-            | PackedConversionSourceFormat::F16x2 => PackedConversionAdapter::Identity,
+            | PackedConversionSourceFormat::F16x2
+            | PackedConversionSourceFormat::Ue8m0x2 => PackedConversionAdapter::Identity,
         }
     );
     let rounding = match conversion.rounding {
@@ -4107,6 +4129,18 @@ fn register_mma_effective_kind(record: &CatalogIntrinsic) -> RegisterMmaKind {
     })
 }
 
+fn register_mma_scale_selector_contract(record: &CatalogIntrinsic) -> &'static str {
+    match register_mma_effective_kind(record) {
+        RegisterMmaKind::Mxf4 => {
+            "For `scale_vec::2X`, byte/thread selectors must identify the packed scale pair in each scale register according to the PTX scale-factor A/B ID layout; invalid selectors make the PTX operation undefined."
+        }
+        RegisterMmaKind::Mxf8f6f4 => {
+            "For `scale_vec::1X`, A and B byte selectors must be in `0..=3`, the A thread selector in `0..=1`, and the B thread selector in `0..=3`; other values make the PTX operation undefined."
+        }
+        kind => panic!("scaled register-MMA adapter is unsupported for kind {kind:?}"),
+    }
+}
+
 fn register_mma_attr_variants(
     record: &CatalogIntrinsic,
 ) -> (
@@ -4142,6 +4176,7 @@ fn register_mma_attr_variants(
     let kind = match register_mma_effective_kind(record) {
         RegisterMmaKind::Standard => "RegisterMmaKindAttr::Standard",
         RegisterMmaKind::F8f6f4 => "RegisterMmaKindAttr::F8f6f4",
+        RegisterMmaKind::Mxf4 => "RegisterMmaKindAttr::Mxf4",
         RegisterMmaKind::Mxf8f6f4 => "RegisterMmaKindAttr::Mxf8f6f4",
     };
     let accumulator = match mma.accumulator {
@@ -4825,9 +4860,14 @@ fn render_raw_abi(catalog: &CatalogFile, hash: &str) -> String {
                 if mma.adapter == RegisterMmaAdapter::C4F32A4U32B2U32Scales2U32Selectors4U16ToD4F32
                 {
                     output.push_str(
-                        "/// `_arg3` and `_arg6` contain this lane's packed A and B scale data. `_arg4`/`_arg5` and `_arg7`/`_arg8` are the corresponding byte/thread selectors.\n\
-                         /// For `scale_vec::1X`, A and B byte selectors must be in `0..=3`, the A thread selector in `0..=1`, and the B thread selector in `0..=3`; other values make the PTX operation undefined.\n",
+                        "/// `_arg3` and `_arg6` contain this lane's packed A and B scale data. `_arg4`/`_arg5` and `_arg7`/`_arg8` are the corresponding byte/thread selectors.\n",
                     );
+                    writeln!(
+                        output,
+                        "/// {}",
+                        register_mma_scale_selector_contract(record)
+                    )
+                    .unwrap();
                 }
                 writeln!(
                     output,
@@ -5250,10 +5290,13 @@ fn render_compat_register_mma(catalog: &CatalogFile, hash: &str) -> String {
             "/// `c`, `a`, and `b` must contain this lane's fragments in the documented PTX layout.\n",
         );
         if mma.adapter == RegisterMmaAdapter::C4F32A4U32B2U32Scales2U32Selectors4U16ToD4F32 {
-            output.push_str(
-                "/// `scale_a` and `scale_b` contain this lane's packed scale data.\n\
-                 /// For `scale_vec::1X`, `byte_id_a` and `byte_id_b` must be in `0..=3`, `thread_id_a` in `0..=1`, and `thread_id_b` in `0..=3`; other values make the PTX operation undefined.\n",
-            );
+            output.push_str("/// `scale_a` and `scale_b` contain this lane's packed scale data.\n");
+            writeln!(
+                output,
+                "/// {}",
+                register_mma_scale_selector_contract(record)
+            )
+            .unwrap();
         }
         writeln!(
             output,
@@ -7272,7 +7315,9 @@ fn render_compat_packed_conversion(
             PackedConversionSourceFormat::F32x2 => vec![argument_names.0, argument_names.1],
             PackedConversionSourceFormat::E4m3x2
             | PackedConversionSourceFormat::E5m2x2
-            | PackedConversionSourceFormat::F16x2 => vec!["packed"],
+            | PackedConversionSourceFormat::F16x2
+            | PackedConversionSourceFormat::E2m1x2
+            | PackedConversionSourceFormat::Ue8m0x2 => vec!["packed"],
         };
         let parameter_types = packed_conversion_rust_arguments(record);
         let parameters = parameter_names
@@ -9214,7 +9259,7 @@ pub enum RegisterMmaOperationAttr { Multiply, AndPopc, XorPopc }
 
 #[pliron_attr(name = "nvvm.register_mma_kind", format, verifier = "succ")]
 #[derive(PartialEq, Eq, Clone, Debug, Hash)]
-pub enum RegisterMmaKindAttr { Standard, F8f6f4, Mxf8f6f4 }
+pub enum RegisterMmaKindAttr { Standard, F8f6f4, Mxf4, Mxf8f6f4 }
 
 #[pliron_attr(name = "nvvm.register_mma_accumulator", format, verifier = "succ")]
 #[derive(PartialEq, Eq, Clone, Debug, Hash)]
@@ -9944,7 +9989,9 @@ fn render_dialect_packed_conversion(catalog: &CatalogFile, hash: &str) -> String
             }
             PackedConversionSourceFormat::E4m3x2
             | PackedConversionSourceFormat::E5m2x2
-            | PackedConversionSourceFormat::F16x2 => {
+            | PackedConversionSourceFormat::F16x2
+            | PackedConversionSourceFormat::E2m1x2
+            | PackedConversionSourceFormat::Ue8m0x2 => {
                 let source_width = packed_conversion_source_width(record);
                 writeln!(
                     output,
@@ -14834,7 +14881,7 @@ fn tcgen05_inline_asm(record: &CatalogIntrinsic) -> (String, String, Option<usiz
 fn render_lowering(catalog: &CatalogFile, hash: &str) -> String {
     let mut output = rust_header(catalog, hash);
     output.push_str(
-        "//! Generated conversion interfaces for admitted CUDA intrinsic families.\n\nuse crate::conversion_interface::MirToLlvmConversion;\nuse crate::convert::intrinsics::{atomic::convert_packed_atom_add, basic::convert_sreg_read_inline, common::{call_intrinsic, create_i32_const, inline_asm_convergent}, cp_async::{convert_generated_cp_async_control, convert_generated_cp_async_copy, convert_generated_cp_async_mbarrier}, dotprod::convert_generated_dot_product, ldmatrix::convert_generated_ldmatrix, mbarrier::{convert_arrive, convert_init, convert_inval, convert_test_wait}, packed::{convert_generated_packed_alu, convert_generated_packed_f32x2, convert_generated_packed_unary}, prmt::convert_generated_prmt, warp::{convert_active_mask, convert_bar_warp_sync, convert_match_all, convert_match_any, convert_redux, convert_shuffle_f32, convert_shuffle_i32, convert_shuffle_i64, convert_vote}, wmma::{convert_generated_register_mma, convert_generated_sparse_mma, GeneratedMmaResultType}};\nuse crate::{context, IntrinsicBackend};\nuse dialect_nvvm::ops::{",
+        "//! Generated conversion interfaces for admitted CUDA intrinsic families.\n\nuse crate::conversion_interface::MirToLlvmConversion;\nuse crate::convert::intrinsics::{atomic::convert_packed_atom_add, basic::convert_sreg_read_inline, common::{call_intrinsic, create_i32_const, inline_asm_convergent}, cp_async::{convert_generated_cp_async_control, convert_generated_cp_async_copy, convert_generated_cp_async_mbarrier}, dotprod::convert_generated_dot_product, ldmatrix::convert_generated_ldmatrix, mbarrier::{convert_arrive, convert_init, convert_inval, convert_test_wait}, packed::{convert_generated_packed_alu, convert_generated_packed_e2m1x2, convert_generated_packed_f32x2, convert_generated_packed_unary}, prmt::convert_generated_prmt, warp::{convert_active_mask, convert_bar_warp_sync, convert_match_all, convert_match_any, convert_redux, convert_shuffle_f32, convert_shuffle_i32, convert_shuffle_i64, convert_vote}, wmma::{convert_generated_register_mma, convert_generated_sparse_mma, GeneratedMmaResultType}};\nuse crate::{context, IntrinsicBackend};\nuse dialect_nvvm::ops::{",
     );
     if debug_controls(catalog).next().is_some() {
         output = output.replace(
@@ -16128,9 +16175,19 @@ fn convert_generated_tcgen05_load(
                 )
                 .unwrap();
             }
+            PackedConversionSourceFormat::E2m1x2 => {
+                debug_assert_eq!(conversion.adapter, PackedConversionAdapter::LowByteFromU16);
+                writeln!(
+                    output,
+                    "        convert_generated_packed_e2m1x2(ctx, rewriter, self.get_operation(), {:?})",
+                    packed_conversion_ptx_mnemonic(record),
+                )
+                .unwrap();
+            }
             PackedConversionSourceFormat::E4m3x2
             | PackedConversionSourceFormat::E5m2x2
-            | PackedConversionSourceFormat::F16x2 => {
+            | PackedConversionSourceFormat::F16x2
+            | PackedConversionSourceFormat::Ue8m0x2 => {
                 debug_assert_eq!(conversion.adapter, PackedConversionAdapter::Identity);
                 writeln!(
                     output,
@@ -17099,6 +17156,7 @@ fn generated_intrinsic_variant(record: &CatalogIntrinsic) -> String {
         let kind = match register_mma_effective_kind(record) {
             RegisterMmaKind::Standard => "GeneratedRegisterMmaKind::Standard",
             RegisterMmaKind::F8f6f4 => "GeneratedRegisterMmaKind::F8f6f4",
+            RegisterMmaKind::Mxf4 => "GeneratedRegisterMmaKind::Mxf4",
             RegisterMmaKind::Mxf8f6f4 => "GeneratedRegisterMmaKind::Mxf8f6f4",
         };
         let accumulator = match mma.accumulator {
@@ -17399,7 +17457,7 @@ impl GeneratedIntrinsicTarget {
     replace_exact_render_fragment(
         &mut output,
         "pub enum GeneratedRegisterMmaAccumulator { F32, F64, S32 }",
-        "pub enum GeneratedRegisterMmaOperation { Multiply, AndPopc, XorPopc }\n#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub enum GeneratedRegisterMmaKind { Standard, F8f6f4, Mxf8f6f4 }\n#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub enum GeneratedRegisterMmaAccumulator { F16, F32, F64, S32 }",
+        "pub enum GeneratedRegisterMmaOperation { Multiply, AndPopc, XorPopc }\n#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub enum GeneratedRegisterMmaKind { Standard, F8f6f4, Mxf4, Mxf8f6f4 }\n#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub enum GeneratedRegisterMmaAccumulator { F16, F32, F64, S32 }",
     );
     replace_exact_render_fragment(
         &mut output,
@@ -17605,7 +17663,7 @@ impl GeneratedIntrinsicTarget {
     replace_exact_render_fragment(
         &mut output,
         "            };\n            let accumulator_matches = match accumulator {",
-        "            };\n            let operation_matches = match mma_operation {\n                GeneratedRegisterMmaOperation::Multiply => op.operation_or_multiply(ctx) == RegisterMmaOperationAttr::Multiply,\n                GeneratedRegisterMmaOperation::AndPopc => op.operation_or_multiply(ctx) == RegisterMmaOperationAttr::AndPopc,\n                GeneratedRegisterMmaOperation::XorPopc => op.operation_or_multiply(ctx) == RegisterMmaOperationAttr::XorPopc,\n            };\n            let kind_matches = match kind {\n                GeneratedRegisterMmaKind::Standard => op.kind_or_inferred(ctx) == RegisterMmaKindAttr::Standard,\n                GeneratedRegisterMmaKind::F8f6f4 => op.kind_or_inferred(ctx) == RegisterMmaKindAttr::F8f6f4,\n                GeneratedRegisterMmaKind::Mxf8f6f4 => op.kind_or_inferred(ctx) == RegisterMmaKindAttr::Mxf8f6f4,\n            };\n            let accumulator_matches = match accumulator {",
+        "            };\n            let operation_matches = match mma_operation {\n                GeneratedRegisterMmaOperation::Multiply => op.operation_or_multiply(ctx) == RegisterMmaOperationAttr::Multiply,\n                GeneratedRegisterMmaOperation::AndPopc => op.operation_or_multiply(ctx) == RegisterMmaOperationAttr::AndPopc,\n                GeneratedRegisterMmaOperation::XorPopc => op.operation_or_multiply(ctx) == RegisterMmaOperationAttr::XorPopc,\n            };\n            let kind_matches = match kind {\n                GeneratedRegisterMmaKind::Standard => op.kind_or_inferred(ctx) == RegisterMmaKindAttr::Standard,\n                GeneratedRegisterMmaKind::F8f6f4 => op.kind_or_inferred(ctx) == RegisterMmaKindAttr::F8f6f4,\n                GeneratedRegisterMmaKind::Mxf4 => op.kind_or_inferred(ctx) == RegisterMmaKindAttr::Mxf4,\n                GeneratedRegisterMmaKind::Mxf8f6f4 => op.kind_or_inferred(ctx) == RegisterMmaKindAttr::Mxf8f6f4,\n            };\n            let accumulator_matches = match accumulator {",
     );
     replace_exact_render_fragment(
         &mut output,
@@ -19089,6 +19147,19 @@ pub(crate) fn render_probe(catalog: &CatalogFile, record: &CatalogIntrinsic, has
                 packed_conversion_constraint(record),
             )
             .unwrap();
+        } else if packed_conversion_source(record) == PackedConversionSourceFormat::E2m1x2 {
+            writeln!(
+                output,
+                "define {result_ty} @probe_{}(i16 %packed) {{",
+                record.id,
+            )
+            .unwrap();
+            writeln!(
+                output,
+                "  %result = call {result_ty} asm \"{{ .reg .b8 e2m1x2_byte; cvt.u8.u16 e2m1x2_byte, $1; {} $0, e2m1x2_byte; }}\", \"=r,h\"(i16 %packed)",
+                packed_conversion_ptx_mnemonic(record),
+            )
+            .unwrap();
         } else {
             // A packed source arrives in one integer register, so the probe
             // takes a single operand and needs no reordering.
@@ -19915,9 +19986,10 @@ fn render_reference(catalog: &CatalogFile, hash: &str) -> String {
             RuntimeValidation::Executed => "executed on a GPU",
         };
         if mma.adapter == RegisterMmaAdapter::C4F32A4U32B2U32Scales2U32Selectors4U16ToD4F32 {
+            let selector_contract = register_mma_scale_selector_contract(record);
             writeln!(
                 output,
-                "- `{}` takes C, A, B, scale-A data/selectors, and scale-B data/selectors in PTX operand order, performs {operation}, and lowers to one convergent, register-only `{}` instruction. For `scale_vec::1X`, byte selectors must be in `0..=3`, the A thread selector in `0..=1`, and the B thread selector in `0..=3`. Every non-exited warp lane must execute the same instruction and qualifiers. Integer overflow is {overflow}; runtime validation is {runtime}.",
+                "- `{}` takes C, A, B, scale-A data/selectors, and scale-B data/selectors in PTX operand order, performs {operation}, and lowers to one convergent, register-only `{}` instruction. {selector_contract} Every non-exited warp lane must execute the same instruction and qualifiers. Integer overflow is {overflow}; runtime validation is {runtime}.",
                 record.id,
                 expected_ptx_head(record),
             )
@@ -20033,11 +20105,33 @@ fn render_reference(catalog: &CatalogFile, hash: &str) -> String {
                 packed_conversion_ptx_mnemonic(record),
             )
             .unwrap();
-        } else {
+        } else if conversion.source_format == PackedConversionSourceFormat::F32x2 {
             writeln!(
                 output,
                 "- `{}` converts two `f32` inputs to packed `{}` using {rounding} rounding {saturation}. It lowers to pure `{}` inline PTX. The first input becomes the low lane and the second becomes the high lane, so PTX prints the inputs in reverse order.",
                 record.id,
+                packed_conversion_destination(record),
+                packed_conversion_ptx_mnemonic(record),
+            )
+            .unwrap();
+        } else {
+            let carrier = &record.rust.arguments[0];
+            let adapter = match conversion.adapter {
+                PackedConversionAdapter::LowByteFromU16 => {
+                    "The two E2M1 values occupy the carrier's low byte; lowering moves that byte to the PTX `.b8` source register."
+                }
+                PackedConversionAdapter::Identity => {
+                    "The single carrier holds both lanes and lane order is preserved."
+                }
+                PackedConversionAdapter::ReverseHighLowOperands => {
+                    unreachable!("packed source cannot use the scalar-pair adapter")
+                }
+            };
+            writeln!(
+                output,
+                "- `{}` converts one packed `{}` `{carrier}` carrier to packed `{}` using {rounding} rounding {saturation}. It lowers to pure `{}` inline PTX. {adapter}",
+                record.id,
+                conversion.source_format.ptx_token(),
                 packed_conversion_destination(record),
                 packed_conversion_ptx_mnemonic(record),
             )
@@ -21089,7 +21183,7 @@ mod tests {
         let catalog = crate::resolve::resolve(&repo_root).unwrap();
         validate_renderable(&catalog).unwrap();
         assert_eq!(packed_alus(&catalog).count(), 30);
-        assert_eq!(packed_conversions(&catalog).count(), 18);
+        assert_eq!(packed_conversions(&catalog).count(), 20);
 
         let dialect = render_dialect_packed_alu(&catalog, "test-hash");
         for op in [
@@ -21135,6 +21229,8 @@ mod tests {
             "CvtRnSatfiniteReluE4m3x2F32Op",
             "CvtRnSatfiniteE5m2x2F32Op",
             "CvtRnSatfiniteReluE5m2x2F32Op",
+            "CvtRnF16x2E2m1x2Op",
+            "CvtRnBf16x2Ue8m0x2Op",
         ] {
             assert!(conversion_dialect.contains(&format!("pub struct {op}")));
             assert!(conversion_dialect.contains(&format!("{op}::register(ctx)")));
@@ -21153,6 +21249,8 @@ mod tests {
         assert!(importer.contains("cuda_device::convert::cvt_rz_bf16x2_f32"));
         assert!(importer.contains("cuda_device::convert::cvt_rn_satfinite_e4m3x2_f32"));
         assert!(importer.contains("cuda_device::convert::cvt_rn_satfinite_relu_e5m2x2_f32"));
+        assert!(importer.contains("cuda_device::convert::cvt_rn_f16x2_e2m1x2"));
+        assert!(importer.contains("cuda_device::convert::cvt_rn_bf16x2_ue8m0x2"));
         assert!(importer.contains("FmaBf16x2Op::build(ctx, arg0, arg1, arg2)"));
         assert!(importer.contains("CvtF32x2Bf16x2Op::build(ctx, arg0, arg1)"));
 
@@ -21181,6 +21279,12 @@ mod tests {
                 "convert_generated_packed_alu(ctx, rewriter, self.get_operation(), \"{mnemonic}\", 32)"
             )));
         }
+        assert!(lowering.contains(
+            "convert_generated_packed_e2m1x2(ctx, rewriter, self.get_operation(), \"cvt.rn.f16x2.e2m1x2\")"
+        ));
+        assert!(lowering.contains(
+            "convert_generated_packed_unary(ctx, rewriter, self.get_operation(), \"cvt.rn.bf16x2.ue8m0x2\", 32, 16)"
+        ));
         for mnemonic in [
             "add.rn.f32x2",
             "add.rn.ftz.f32x2",
@@ -21255,6 +21359,11 @@ mod tests {
                     packed_conversion_constraint(conversion),
                 )));
                 assert!(!probe.contains("declare "));
+            } else if packed_conversion_source(conversion) == PackedConversionSourceFormat::E2m1x2 {
+                assert!(probe.contains(
+                    "asm \"{ .reg .b8 e2m1x2_byte; cvt.u8.u16 e2m1x2_byte, $1; cvt.rn.f16x2.e2m1x2 $0, e2m1x2_byte; }\", \"=r,h\"(i16 %packed)"
+                ));
+                assert!(!probe.contains("declare "));
             } else {
                 // One packed source operand, so no high/low reordering.
                 let source_ty = format!("i{}", packed_conversion_source_width(conversion));
@@ -21278,6 +21387,8 @@ mod tests {
         assert!(raw.contains("pub fn i0262(_arg0: f32, _arg1: f32) -> u16"));
         assert!(raw.contains("pub fn i0995(_arg0: u64, _arg1: u64) -> u64"));
         assert!(raw.contains("pub fn i1002(_arg0: u64, _arg1: u64, _arg2: u64) -> u64"));
+        assert!(raw.contains("pub fn i1003(_arg0: u16) -> u32"));
+        assert!(raw.contains("pub fn i1004(_arg0: u16) -> u32"));
         assert!(!raw.contains("#[must_use]\n#[inline(never)]\npub fn i0062"));
         let f16_raw = raw.find("pub fn i0072").unwrap();
         assert!(raw[..f16_raw].ends_with("#[must_use]\n#[inline(never)]\n"));
@@ -21312,6 +21423,14 @@ mod tests {
         assert!(reference.contains(
             "LLVM-NVPTX uses typed `llvm.nvvm.ff.to.e4m3x2.rn` with `[high, low]` inputs; libNVVM uses pure `cvt.rn.satfinite.e4m3x2.f32` inline PTX"
         ));
+        assert!(
+            reference.contains("`cvt_rn_f16x2_e2m1x2` converts one packed `e2m1x2` `u16` carrier")
+        );
+        assert!(reference.contains("lowering moves that byte to the PTX `.b8` source register"));
+        assert!(
+            reference
+                .contains("`cvt_rn_bf16x2_ue8m0x2` converts one packed `ue8m0x2` `u16` carrier")
+        );
         let outputs = all_outputs(&catalog, "{}\n".into(), "test-hash").unwrap();
         assert!(outputs.contains_key(&PathBuf::from("crates/cuda-device/src/generated/bf16x2.rs")));
         assert!(outputs.contains_key(&PathBuf::from("crates/cuda-device/src/generated/f16x2.rs")));
@@ -22643,9 +22762,9 @@ mod tests {
         let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let catalog = crate::resolve::resolve(&repo_root).unwrap();
         validate_renderable(&catalog).unwrap();
-        assert_eq!(catalog.intrinsics.len(), 1002);
+        assert_eq!(catalog.intrinsics.len(), 1005);
         let records: Vec<_> = register_mmas(&catalog).collect();
-        assert_eq!(records.len(), 154);
+        assert_eq!(records.len(), 155);
         let generated_records = records
             .iter()
             .copied()
@@ -22662,7 +22781,7 @@ mod tests {
                     == RegisterMmaCompatibilitySource::ExistingStub
             })
             .collect::<Vec<_>>();
-        assert_eq!(generated_records.len(), 149);
+        assert_eq!(generated_records.len(), 150);
         assert_eq!(existing_records.len(), 5);
 
         let raw = render_raw_abi(&catalog, "test-hash");
@@ -22672,9 +22791,13 @@ mod tests {
         assert!(raw.contains("no lane may have exited"));
         assert!(raw.contains("Signed accumulator overflow wraps"));
         assert!(raw.contains("Signed accumulator overflow clamps"));
+        assert!(raw.contains("For `scale_vec::1X`, A and B byte selectors"));
+        assert!(raw.contains(
+            "For `scale_vec::2X`, byte/thread selectors must identify the packed scale pair"
+        ));
 
         let compatibility = render_compat_register_mma(&catalog, "test-hash");
-        assert_eq!(compatibility.matches("pub unsafe fn ").count(), 149);
+        assert_eq!(compatibility.matches("pub unsafe fn ").count(), 150);
         for record in generated_records {
             let argument_names: &[&str] = if record.register_mma.as_ref().unwrap().adapter
                 == RegisterMmaAdapter::C4F32A4U32B2U32Scales2U32Selectors4U16ToD4F32
@@ -22723,7 +22846,9 @@ mod tests {
         assert!(dialect.contains("RegisterMmaOperationAttr::Multiply"));
         assert!(dialect.contains("RegisterMmaOperationAttr::AndPopc"));
         assert!(dialect.contains("RegisterMmaOperationAttr::XorPopc"));
-        assert!(dialect.contains("pub enum RegisterMmaKindAttr { Standard, F8f6f4, Mxf8f6f4 }"));
+        assert!(
+            dialect.contains("pub enum RegisterMmaKindAttr { Standard, F8f6f4, Mxf4, Mxf8f6f4 }")
+        );
         assert!(dialect.contains("kind_or_inferred"));
         assert!(dialect.contains("RegisterMmaAccumulatorAttr::F16"));
         assert!(dialect.contains("operation_or_multiply"));
@@ -22860,6 +22985,9 @@ mod tests {
         assert!(lowering.contains(
             r#"(GeneratedMmaResultType::F32, 4, 16, "mma.sync.aligned.m16n8k32.row.col.kind::mxf8f6f4.block_scale.f32.e2m1.e2m1.f32.ue8m0 {$0, $1, $2, $3}, {$8, $9, $10, $11}, {$12, $13}, {$4, $5, $6, $7}, $14, {$15, $16}, $17, {$18, $19};", "=f,=f,=f,=f,f,f,f,f,r,r,r,r,r,r,r,h,h,r,h,h")"#
         ));
+        assert!(lowering.contains(
+            r#"(GeneratedMmaResultType::F32, 4, 16, "mma.sync.aligned.m16n8k64.row.col.kind::mxf4.block_scale.scale_vec::2X.f32.e2m1.e2m1.f32.ue8m0 {$0, $1, $2, $3}, {$8, $9, $10, $11}, {$12, $13}, {$4, $5, $6, $7}, $14, {$15, $16}, $17, {$18, $19};", "=f,=f,=f,=f,f,f,f,f,r,r,r,r,r,r,r,h,h,r,h,h")"#
+        ));
 
         let targets = render_targets(&catalog, "test-hash");
         assert!(targets.contains("GeneratedIntrinsicVariant::RegisterMma"));
@@ -22891,14 +23019,17 @@ mod tests {
         assert!(targets.contains("GeneratedRegisterMmaOperation::AndPopc"));
         assert!(targets.contains("GeneratedRegisterMmaOperation::XorPopc"));
         assert!(
-            targets.contains("pub enum GeneratedRegisterMmaKind { Standard, F8f6f4, Mxf8f6f4 }")
+            targets
+                .contains("pub enum GeneratedRegisterMmaKind { Standard, F8f6f4, Mxf4, Mxf8f6f4 }")
         );
         assert!(targets.contains("kind: GeneratedRegisterMmaKind::Standard"));
         assert!(targets.contains("kind: GeneratedRegisterMmaKind::F8f6f4"));
+        assert!(targets.contains("kind: GeneratedRegisterMmaKind::Mxf4"));
         assert!(targets.contains("kind: GeneratedRegisterMmaKind::Mxf8f6f4"));
         assert!(targets.contains("kind_or_inferred"));
         assert!(targets.contains("RegisterMmaKindAttr::Standard"));
         assert!(targets.contains("RegisterMmaKindAttr::F8f6f4"));
+        assert!(targets.contains("RegisterMmaKindAttr::Mxf4"));
         assert!(targets.contains("RegisterMmaKindAttr::Mxf8f6f4"));
         assert!(targets.contains("GeneratedRegisterMmaAccumulator::F16"));
         assert!(targets.contains("operation: GeneratedRegisterMmaOperation::AndPopc"));
@@ -22999,6 +23130,10 @@ mod tests {
 
         let reference = render_reference(&catalog, "test-hash");
         assert!(reference.contains("## Register-MMA contracts"));
+        assert!(reference.contains("For `scale_vec::1X`, A and B byte selectors"));
+        assert!(reference.contains(
+            "For `scale_vec::2X`, byte/thread selectors must identify the packed scale pair"
+        ));
         assert!(reference.contains("performs XOR, population count, and accumulate"));
         assert!(reference.contains("performs AND, population count, and accumulate"));
         assert!(reference.contains("runtime validation is not executed on a GPU"));
