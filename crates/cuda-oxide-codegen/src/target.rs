@@ -593,9 +593,10 @@ fn contains_tma_cta_group_features(contents: &str) -> bool {
 /// copies, so the following `.global` source qualifier is part of the match.
 /// The destination form was introduced in PTX 8.6 but is valid on sm_90.
 fn contains_tma_shared_cta_destination(contents: &str) -> bool {
-    contents.split(';').any(|statement| {
-        statement.contains("cp.async.bulk.") && statement.contains(".shared::cta.global")
-    })
+    contents.contains("llvm.nvvm.cp.async.bulk.tensor.g2s.cta.")
+        || contents.split(';').any(|statement| {
+            statement.contains("cp.async.bulk.") && statement.contains(".shared::cta.global")
+        })
 }
 
 /// Checks PTX 8.6 TMA modifiers with a generic sm_100 architecture floor.
@@ -4400,6 +4401,19 @@ mod tests {
         let shared_cta_requirements = detect_module_requirements_in_llvm_text(shared_cta);
         assert_eq!(shared_cta_requirements.features, DetectedFeatures::Tma);
         assert_eq!(shared_cta_requirements.ptx_isa, PtxIsaRequirement::Ptx86);
+
+        let shared_cta_intrinsic = "call void @llvm.nvvm.cp.async.bulk.tensor.g2s.cta.tile.2d(ptr addrspace(3) %dst, ptr addrspace(3) %bar, ptr %map, i32 0, i32 0, i64 0, i1 false)";
+        assert!(contains_tma_shared_cta_destination(shared_cta_intrinsic));
+        let shared_cta_intrinsic_requirements =
+            detect_module_requirements_in_llvm_text(shared_cta_intrinsic);
+        assert_eq!(
+            shared_cta_intrinsic_requirements.features,
+            DetectedFeatures::Tma
+        );
+        assert_eq!(
+            shared_cta_intrinsic_requirements.ptx_isa,
+            PtxIsaRequirement::Ptx86
+        );
 
         let shared_source = "cp.async.bulk.tensor.2d.global.shared::cta.tile.bulk_group;";
         assert!(!contains_tma_shared_cta_destination(shared_source));

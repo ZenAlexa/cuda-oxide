@@ -16,11 +16,14 @@ use llvm_export::{
         AddrSpaceCastOp, AddressOfOp, AllocaOp, BitcastOp, BrOp, CallOp, CondBrOp, ConstantOp,
         DebugEnumDiscriminant, DebugEnumVariant, DebugLocalTypeKind, DebugLocalVariableInfo,
         DebugProjectedVariableInfo, DebugSourcePosition, DebugSourceScope,
-        DebugSourceScopeLocation, DebugSourceScopeMap, DebugValueOp, FuncOp, GepIndex,
-        GetElementPtrOp, GlobalInitializerRelocation, GlobalOp, GlobalOpExt, InlineAsmOp, LoadOp,
-        ReturnOp, SelectOp, StoreOp, UndefOp, encode_global_initializer_relocations,
+        DebugSourceScopeLocation, DebugSourceScopeMap, DebugValueOp, ExtractElementOp, FuncOp,
+        GepIndex, GetElementPtrOp, GlobalInitializerRelocation, GlobalOp, GlobalOpExt, InlineAsmOp,
+        LoadOp, ReturnOp, SelectOp, StoreOp, UndefOp, encode_global_initializer_relocations,
     },
-    types::{ArrayType, FuncType, HalfType, PointerType, StructLayout, StructType, VoidType},
+    types::{
+        ArrayType, FuncType, HalfType, PointerType, StructLayout, StructType, VectorType,
+        VectorTypeKind, VoidType,
+    },
 };
 use pliron::{
     basic_block::BasicBlock,
@@ -98,6 +101,40 @@ fn module_top_block(ctx: &mut Context, module: &ModuleOp) -> Ptr<BasicBlock> {
     let block = BasicBlock::new(ctx, None, vec![]);
     block.insert_at_back(module_region, ctx);
     block
+}
+
+#[test]
+fn export_extract_element_prints_vector_and_index_types() {
+    let mut ctx = Context::new();
+
+    let module = ModuleOp::new(&mut ctx, "test_module".try_into().unwrap());
+    let module_block = module_top_block(&mut ctx, &module);
+    let i8_ty = IntegerType::get(&ctx, 8, Signedness::Signless);
+    let i64_ty = IntegerType::get(&ctx, 64, Signedness::Signless);
+    let vector_ty = VectorType::get(&ctx, i8_ty.to_handle(), 4, VectorTypeKind::Fixed);
+    let function_type = FuncType::get(
+        &ctx,
+        i8_ty.to_handle(),
+        vec![vector_ty.to_handle(), i64_ty.to_handle()],
+        false,
+    );
+    let function = FuncOp::new(&mut ctx, "extract_lane".try_into().unwrap(), function_type);
+    let entry = function.get_or_create_entry_block(&mut ctx);
+    let vector = entry.deref(&ctx).get_argument(0);
+    let index = entry.deref(&ctx).get_argument(1);
+    let extract = ExtractElementOp::new(&mut ctx, vector, index);
+    let result = extract.get_operation().deref(&ctx).get_result(0);
+    extract.get_operation().insert_at_back(entry, &ctx);
+    ReturnOp::new(&mut ctx, Some(result))
+        .get_operation()
+        .insert_at_back(entry, &ctx);
+    function.get_operation().insert_at_back(module_block, &ctx);
+
+    let ir = export_module_to_string(&ctx, &module).expect("export succeeds");
+    assert!(
+        ir.contains(" = extractelement <4 x i8> %v0, i64 %v1"),
+        "unexpected extractelement spelling:\n{ir}"
+    );
 }
 
 #[test]
