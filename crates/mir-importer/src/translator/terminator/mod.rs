@@ -973,6 +973,25 @@ fn translate_call(
     // Extract function info
     let (pattern_name, call_name, substs_str, type_substs) = extract_func_info(func, &loc)?;
 
+    // Keep CuTe calls as CuTe operations while their tensor and layout
+    // meaning is still visible. Ordinary source helpers continue through the
+    // normal Rust-body path.
+    if let Some(result) = crate::translator::cute::try_translate_cute_call(
+        ctx,
+        body,
+        func,
+        args,
+        destination,
+        &target.map(|block| block),
+        block_ptr,
+        prev_op,
+        value_map,
+        block_map,
+        &loc,
+    ) {
+        return result;
+    }
+
     // Helper to check if substitutions contain a type
     let substs_contains =
         |pattern: &str| -> bool { substs_str.as_ref().is_some_and(|s| s.contains(pattern)) };
@@ -1913,7 +1932,10 @@ fn extract_function_item_target(
         requires_direct_dispatch: fn_def.is_intrinsic()
             || instance.is_foreign_item()
             || !instance.has_body()
-            || matches!(crate_name.as_str(), "cuda_device" | "cuda-device" | "libm")
+            || matches!(
+                crate_name.as_str(),
+                "cuda_device" | "cuda-device" | "libm" | "cute_rs" | "cute-rs"
+            )
             || generated_direct_call_only,
     }))
 }

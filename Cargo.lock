@@ -449,6 +449,7 @@ dependencies = [
 name = "cuda-oxide-codegen"
 version = "0.1.0"
 dependencies = [
+ "dialect-cute",
  "dialect-iket",
  "dialect-mir",
  "dialect-nvvm",
@@ -462,6 +463,34 @@ dependencies = [
  "ptx-parse",
  "rustc-demangle",
  "tempfile",
+ "thiserror",
+]
+
+[[package]]
+name = "cute-layout"
+version = "0.1.0"
+
+[[package]]
+name = "cute-rs"
+version = "0.1.0"
+dependencies = [
+ "cuda-core",
+ "cuda-device",
+ "cute-layout",
+ "trybuild",
+]
+
+[[package]]
+name = "dialect-cute"
+version = "0.1.0"
+dependencies = [
+ "combine",
+ "cute-layout",
+ "dialect-mir",
+ "linkme",
+ "once_cell",
+ "pliron",
+ "pliron-derive",
  "thiserror",
 ]
 
@@ -895,6 +924,8 @@ version = "0.2.1"
 dependencies = [
  "combine",
  "cuda-oxide-codegen",
+ "cute-layout",
+ "dialect-cute",
  "dialect-iket",
  "dialect-mir",
  "dialect-nvvm",

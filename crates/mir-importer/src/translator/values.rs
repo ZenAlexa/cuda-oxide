@@ -59,6 +59,12 @@ use rustc_public::ty::{ConstantKind, RigidTy, TyKind};
 /// - ZST locals (and the unit return slot) remain `None` in `slots`.
 pub struct ValueMap {
     slots: Vec<Option<Value>>,
+    /// Compiler-only SSA values that deliberately never enter an alloca.
+    ///
+    /// High-level semantic handles use this route when their verifier needs
+    /// direct producer-to-consumer SSA. Ordinary MIR locals continue to use
+    /// `slots` and later mem2reg promotion.
+    direct_values: Vec<Option<Value>>,
     /// Per-body unchecked-indexing policy, resolved once by
     /// [`super::body::translate_body`] from the `__unchecked_indexing_config`
     /// marker and the `CUDA_OXIDE_UNCHECKED_INDEXING` environment switch.
@@ -72,8 +78,23 @@ impl ValueMap {
     pub fn new(num_locals: usize) -> Self {
         Self {
             slots: vec![None; num_locals],
+            direct_values: vec![None; num_locals],
             unchecked_indexing: false,
         }
+    }
+
+    /// Bind a compiler-only local directly to one SSA value.
+    pub(crate) fn set_direct_value(&mut self, local: mir::Local, value: Value) {
+        let idx: usize = local;
+        if idx < self.direct_values.len() {
+            self.direct_values[idx] = Some(value);
+        }
+    }
+
+    /// Read a compiler-only local that bypasses the alloca model.
+    pub(crate) fn get_direct_value(&self, local: mir::Local) -> Option<Value> {
+        let idx: usize = local;
+        self.direct_values.get(idx).copied().flatten()
     }
 
     /// Record the resolved unchecked-indexing policy for this body.

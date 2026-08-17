@@ -2879,6 +2879,11 @@ pub fn translate_place(
     prev_op: Option<Ptr<Operation>>,
     loc: Location,
 ) -> TranslationResult<(Value, Option<Ptr<Operation>>)> {
+    if place.projection.is_empty()
+        && let Some(value) = value_map.get_direct_value(place.local)
+    {
+        return Ok((value, prev_op));
+    }
     match classify_place_read_strategy(ctx, place, value_map)? {
         PlaceReadStrategy::Address => {
             if let Some((value, last_op)) = translate_place_load_from_address(
@@ -9911,6 +9916,10 @@ fn enum_variant_index_from_storage(
 /// name, never 0 so it cannot look like a null pointer) and casts it
 /// int -> ptr. See the comment at the `Rvalue::Cast` arm for why a token
 /// stands in for a code address on the device.
+fn is_cute_rs_crate(crate_name: &str) -> bool {
+    matches!(crate_name, "cute_rs" | "cute-rs")
+}
+
 fn translate_reify_fn_pointer(
     ctx: &mut Context,
     body: &mir::Body,
@@ -9940,6 +9949,16 @@ fn translate_reify_fn_pointer(
             ))
         );
     };
+    let crate_name = fn_def.krate().name;
+    if is_cute_rs_crate(crate_name.as_str()) {
+        let item_name = fn_def.name();
+        return input_err!(
+            loc,
+            TranslationErr::unsupported(format!(
+                "CuTe function `{item_name}` must be called directly; converting it to a function pointer would erase its layout configuration"
+            ))
+        );
+    }
     let raw_intrinsic =
         crate::translator::terminator::intrinsics::generated::require_supported_raw_intrinsic(
             fn_def, &loc,

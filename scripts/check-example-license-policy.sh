@@ -4,12 +4,12 @@
 # Enforce deny.toml over the example workspaces, which `cargo deny check` does
 # not reach.
 #
-# `cargo deny check` resolves the root workspace.  Every example under
-# crates/rustc-codegen-cuda/examples/ sets its own `[workspace]`, so the root
-# run stops at that boundary and the license, source and ban policies never see
-# any crate an example pulls on its own.  #664 closed the *inventory* half of
-# this (dependency-licenses.csv now records those crates); this closes the
-# *policy* half, so the allow-list in deny.toml actually governs them.
+# `cargo deny check` resolves the root workspace. Every example under the
+# roots below sets its own `[workspace]`, so the root run stops at that boundary
+# and the license, source and ban policies never see any crate an example pulls
+# on its own. #664 closed the *inventory* half of this
+# (dependency-licenses.csv now records those crates); this closes the *policy*
+# half, so the allow-list in deny.toml actually governs them.
 #
 # Measured when this guard was written: 186 of the 187 example lock files
 # already satisfy the policy unchanged, so this is a guard against future drift
@@ -33,7 +33,10 @@ export LC_ALL=C
 
 cd "$(dirname "$0")/.."
 
-EXAMPLES_ROOT=crates/rustc-codegen-cuda/examples
+EXAMPLE_ROOTS=(
+    crates/rustc-codegen-cuda/examples
+    cuteir/examples
+)
 
 # Examples whose dependencies deliberately cannot satisfy deny.toml today.
 #
@@ -74,7 +77,11 @@ command -v cargo-deny >/dev/null 2>&1 || {
 representatives="$(python3 -c '
 import glob, os, re, sys
 
-examples_root, *exempt = sys.argv[1:]
+separator = sys.argv.index("--roots")
+exempt = sys.argv[1:separator]
+example_roots = sys.argv[separator + 1:]
+if not example_roots:
+    sys.exit("parse self-test failed: no example roots configured")
 
 def third_party(lock):
     """(name, version, source) for every locked package that has a source.
@@ -96,19 +103,26 @@ def third_party(lock):
             found.add((name.group(1), version.group(1), source.group(1)))
     return found, seen
 
-locks = sorted(glob.glob(os.path.join(examples_root, "**", "Cargo.lock"), recursive=True))
+locks = sorted(
+    (root, lock)
+    for root in example_roots
+    for lock in glob.glob(os.path.join(root, "**", "Cargo.lock"), recursive=True)
+)
 if len(locks) < 20:
     sys.exit("parse self-test failed: found %d example lock files" % len(locks))
 
-on_disk = {os.path.relpath(lock, examples_root).split(os.sep)[0] for lock in locks}
+on_disk = {
+    os.path.relpath(lock, root).split(os.sep)[0]
+    for root, lock in locks
+}
 unknown = sorted(set(exempt) - on_disk)
 if unknown:
     sys.exit("POLICY_EXEMPT_EXAMPLES names no such example: " + ", ".join(unknown))
 
 groups = {}
 total_seen = 0
-for lock in locks:
-    example = os.path.relpath(lock, examples_root).split(os.sep)[0]
+for root, lock in locks:
+    example = os.path.relpath(lock, root).split(os.sep)[0]
     crates, seen = third_party(lock)
     total_seen += seen
     if example in exempt:
@@ -122,7 +136,7 @@ if total_seen < 100:
 
 for manifest in sorted(groups.values()):
     print(manifest)
-' "${EXAMPLES_ROOT}" "${POLICY_EXEMPT_EXAMPLES[@]}")"
+' "${POLICY_EXEMPT_EXAMPLES[@]}" --roots "${EXAMPLE_ROOTS[@]}")"
 
 total="$(printf '%s\n' "${representatives}" | grep -c .)"
 echo "Checking deny.toml over ${total} representative example workspaces."
@@ -136,7 +150,7 @@ echo "Checking deny.toml over ${total} representative example workspaces."
 failed=()
 for manifest in ${representatives}; do
     if ! cargo deny --manifest-path "${manifest}" --locked check 2>&1 |
-        sed "s|^|  [$(dirname "${manifest#"${EXAMPLES_ROOT}/"}")] |"; then
+        sed "s|^|  [$(dirname "${manifest}")] |"; then
         failed+=("${manifest}")
     fi
 done

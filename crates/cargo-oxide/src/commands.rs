@@ -500,11 +500,11 @@ pub fn list_examples(ctx: &Context, json: bool) {
     if !ctx.is_workspace {
         eprintln!("Error: `cargo oxide list` must be run from inside a cuda-oxide checkout.");
         eprintln!();
-        eprintln!("The command lists examples under crates/rustc-codegen-cuda/examples/.");
+        eprintln!("The command lists the standard and CuTe examples bundled with the workspace.");
         std::process::exit(1);
     }
 
-    let examples = discover_examples(&ctx.examples_dir).unwrap_or_else(|error| {
+    let examples = discover_examples_from_roots(&example_roots(ctx)).unwrap_or_else(|error| {
         eprintln!("Error: {error}");
         std::process::exit(1);
     });
@@ -519,6 +519,26 @@ pub fn list_examples(ctx: &Context, json: bool) {
     };
 
     print!("{output}");
+}
+
+/// Discover all configured example roots and reject duplicate names.
+fn discover_examples_from_roots(roots: &[PathBuf]) -> Result<Vec<ExampleInfo>, String> {
+    let mut examples = Vec::new();
+    for root in roots {
+        examples.extend(discover_examples(root)?);
+    }
+
+    examples.sort_by(|left, right| left.name.cmp(&right.name));
+    if let Some(pair) = examples
+        .windows(2)
+        .find(|pair| pair[0].name == pair[1].name)
+    {
+        return Err(format!(
+            "example name `{}` exists in more than one example root; names must be unique",
+            pair[0].name
+        ));
+    }
+    Ok(examples)
 }
 
 fn discover_examples(examples_dir: &Path) -> Result<Vec<ExampleInfo>, String> {
@@ -5749,26 +5769,55 @@ fn interop_binary_target_from_metadata(
 
 /// Resolve an example name to its directory path, or exit with a list of
 /// available examples if not found.
-fn resolve_example_dir(ctx: &Context, example: &str) -> PathBuf {
-    let example_dir = ctx.examples_dir.join(example);
-    if !example_dir.exists() {
-        eprintln!("Error: Example not found: {}", example_dir.display());
-        eprintln!();
-        eprintln!("Available examples:");
-        if let Ok(entries) = std::fs::read_dir(&ctx.examples_dir) {
-            let mut names: Vec<_> = entries
-                .flatten()
-                .filter(|e| e.path().is_dir())
-                .map(|e| e.file_name().to_string_lossy().to_string())
-                .collect();
-            names.sort();
-            for name in names {
-                eprintln!("  - {}", name);
-            }
+fn example_roots(ctx: &Context) -> Vec<PathBuf> {
+    let mut roots = vec![ctx.examples_dir.clone()];
+    if ctx.is_workspace {
+        let cute_examples = ctx.workspace_root.join("cuteir/examples");
+        if cute_examples.is_dir() {
+            roots.push(cute_examples);
         }
+    }
+    roots
+}
+
+fn resolve_example_dir(ctx: &Context, example: &str) -> PathBuf {
+    let roots = example_roots(ctx);
+    let matches: Vec<_> = roots
+        .iter()
+        .map(|root| root.join(example))
+        .filter(|path| path.is_dir())
+        .collect();
+    if let [example_dir] = matches.as_slice() {
+        return example_dir.clone();
+    }
+    if matches.len() > 1 {
+        eprintln!("Error: Example name is ambiguous: {example}");
+        for path in matches {
+            eprintln!("  - {}", path.display());
+        }
+        eprintln!("Example names must be unique across all configured roots.");
         std::process::exit(1);
     }
-    example_dir
+
+    eprintln!("Error: Example not found: {example}");
+    eprintln!();
+    eprintln!("Available examples:");
+    let mut names: Vec<_> = roots
+        .iter()
+        .filter_map(|root| std::fs::read_dir(root).ok())
+        .flat_map(|entries| {
+            entries
+                .flatten()
+                .filter(|entry| entry.path().is_dir())
+                .map(|entry| entry.file_name().to_string_lossy().to_string())
+        })
+        .collect();
+    names.sort();
+    names.dedup();
+    for name in names {
+        eprintln!("  - {name}");
+    }
+    std::process::exit(1);
 }
 
 const ENCODED_RUSTFLAGS_SEPARATOR: char = '\u{1f}';
@@ -10220,6 +10269,49 @@ Instructions.
         );
         assert_eq!(examples[0].description, "README description.");
         assert_eq!(examples[1].description, "Manifest fallback description");
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn example_discovery_combines_roots_and_rejects_duplicate_names() {
+        let root = unique_temp_dir("cargo_oxide_list_multi_root");
+        let standard = root.join("standard");
+        let cute = root.join("cute");
+        std::fs::create_dir_all(&standard).unwrap();
+        std::fs::create_dir_all(&cute).unwrap();
+
+        write_list_example(&standard, "zeta", None, None);
+        write_list_example(&cute, "alpha", None, None);
+        let examples = discover_examples_from_roots(&[standard.clone(), cute.clone()]).unwrap();
+        assert_eq!(
+            examples
+                .iter()
+                .map(|example| example.name.as_str())
+                .collect::<Vec<_>>(),
+            ["alpha", "zeta"]
+        );
+
+        write_list_example(&cute, "zeta", None, None);
+        let error = discover_examples_from_roots(&[standard, cute]).unwrap_err();
+        assert!(error.contains("example name `zeta` exists in more than one example root"));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn workspace_example_roots_include_existing_cute_examples() {
+        let root = unique_temp_dir("cargo_oxide_cute_example_root");
+        let standard = root.join("crates/rustc-codegen-cuda/examples");
+        let cute = root.join("cuteir/examples");
+        std::fs::create_dir_all(&standard).unwrap();
+        std::fs::create_dir_all(&cute).unwrap();
+
+        let mut ctx = test_context(OxideConfig::default());
+        ctx.workspace_root = root.clone();
+        ctx.examples_dir = standard.clone();
+        ctx.is_workspace = true;
+        assert_eq!(example_roots(&ctx), [standard, cute]);
 
         std::fs::remove_dir_all(root).unwrap();
     }

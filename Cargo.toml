@@ -1,6 +1,10 @@
 [workspace]
 resolver = "3"
 members = [
+    # CuTe frontend and semantic IR shared by every CuTe backend.
+    "cuteir/cute-layout",
+    "cuteir/cute-rs",
+    "cuteir/dialect-cute",
     # Core crates
     "crates/cuda-intrinsics",
     "crates/cuda-intrinsics-gen",
@@ -43,7 +47,7 @@ repository = "https://github.com/NVlabs/cuda-oxide.git"
 # Note: crates/rustc-codegen-cuda is NOT a workspace member because it requires
 # special rustc nightly features and a different build process.
 # Build and run examples with: cargo oxide run <example>
-# Examples are in: crates/rustc-codegen-cuda/examples/
+# Examples are in: crates/rustc-codegen-cuda/examples/ and cuteir/examples/
 
 [workspace.dependencies]
 # Pliron MLIR framework, pinned to the upstream revision containing explicit LLVM struct layouts (#232).
@@ -59,6 +63,8 @@ pliron-llvm = { git = "https://github.com/pliron-org/pliron", rev = "8447aa426e2
 
 # Internal crates
 llvm-export = { path = "crates/llvm-export" }
+cute-layout = { path = "cuteir/cute-layout" }
+dialect-cute = { path = "cuteir/dialect-cute" }
 dialect-mir = { path = "crates/dialect-mir" }
 dialect-iket = { path = "crates/dialect-iket" }
 dialect-ptx = { path = "crates/dialect-ptx" }

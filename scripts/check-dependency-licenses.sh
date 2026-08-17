@@ -117,9 +117,9 @@ echo "OK: ${CSV} records all $(printf '%s\n' "${required}" | grep -c .) declared
 # ---------------------------------------------------------------------------
 # Second half: the example workspaces.
 #
-# Every example under crates/rustc-codegen-cuda/examples/ sets its own
+# Every example under the ordinary and CuTe example roots sets its own
 # [workspace], so neither `cargo deny check` nor the check above resolves any
-# of them -- both stop at the root workspace boundary.  Most examples declare
+# of them -- both stop at the root workspace boundary. Most examples declare
 # only path dependencies on first-party crates and so bring nothing new, but a
 # few link third-party code (tokio, rayon, libm, the cutile-rs git dependency),
 # and that code is compiled by `cargo oxide run <example>` and by
@@ -157,6 +157,10 @@ echo "OK: ${CSV} records all $(printf '%s\n' "${required}" | grep -c .) declared
 # Every name here is checked against the examples on disk below, so a typo or a
 # rename fails the run instead of quietly exempting nothing -- or everything.
 INVENTORY_EXEMPT_EXAMPLES=(cutile_inter_kernel)
+EXAMPLE_ROOTS=(
+    crates/rustc-codegen-cuda/examples
+    cuteir/examples
+)
 
 examples_missing="$(python3 -c '
 import glob, os, re, sys
@@ -178,39 +182,47 @@ with open("dependency-licenses.csv", newline="") as handle:
     next(handle, None)
     covered |= {line.split(",")[0].strip().strip("\r") for line in handle if line.strip()}
 
-examples_root = "crates/rustc-codegen-cuda/examples"
-locks = sorted(glob.glob(os.path.join(examples_root, "**", "Cargo.lock"), recursive=True))
+separator = sys.argv.index("--roots")
+exempt = set(sys.argv[1:separator])
+example_roots = sys.argv[separator + 1:]
+if not example_roots:
+    sys.exit("parse self-test failed: no example roots configured")
+
+locks = sorted(
+    (root, lock)
+    for root in example_roots
+    for lock in glob.glob(os.path.join(root, "**", "Cargo.lock"), recursive=True)
+)
 if len(locks) < 20:
     sys.exit("parse self-test failed: found %d example lock files" % len(locks))
 
-def example_of(lock):
+def example_of(root, lock):
     """Top-level example directory a lockfile belongs to, however deep it sits."""
-    return os.path.relpath(lock, examples_root).split(os.sep)[0]
+    return os.path.relpath(lock, root).split(os.sep)[0]
 
-present = {example_of(lock) for lock in locks}
-exempt = set(sys.argv[1:])
+present = {example_of(root, lock) for root, lock in locks}
 unknown = sorted(exempt - present)
 if unknown:
     sys.exit("INVENTORY_EXEMPT_EXAMPLES names no such example: " + ", ".join(unknown))
 
 seen = 0
 findings = []
-for lock in locks:
-    example = example_of(lock)
+for root, lock in locks:
+    example = example_of(root, lock)
     entries = packages(lock)
     seen += len(entries)
     if example in exempt:
         continue
     extra = sorted({n for n, sourced in entries if sourced and n not in covered})
     if extra:
-        findings.append((example, extra))
+        findings.append((os.path.join(root, example), extra))
 
 if seen < 100:
     sys.exit("parse self-test failed: read %d packages from %d lock files" % (seen, len(locks)))
 
 for example, extra in findings:
     print("%s: %s" % (example, " ".join(extra)))
-' "${INVENTORY_EXEMPT_EXAMPLES[@]}")"
+' "${INVENTORY_EXEMPT_EXAMPLES[@]}" --roots "${EXAMPLE_ROOTS[@]}")"
 
 if [[ -n "${examples_missing}" ]]; then
     echo "error: ${CSV} is missing rows for third-party crates that example" >&2
