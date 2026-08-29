@@ -515,14 +515,12 @@ entry:
 !1 = !{i32 2, i32 0, i32 3, i32 1}
 "#;
 
-    /// Same annotated kernel held through libNVVM by `@llvm.compiler.used`.
-    /// Unlike `@llvm.used`, that intrinsic still permits the linker to discard
-    /// the symbol, so this isolates nvJitLink's final-root contract.
+    /// Same annotated kernel without `@llvm.used`. The live regression compiles
+    /// it with libNVVM optimization disabled so the final nvJitLink operation,
+    /// rather than the producer, owns the deliberate retention decision.
     const UNROOTED_LEGACY_NVVM_IR: &[u8] = br#"
 target datalayout = "e-p:64:64:64-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64-i128:128:128-f32:32:32-f64:64:64-v16:16:16-v32:32:32-v64:64:64-v128:128-n16:32:64"
 target triple = "nvptx64-nvidia-cuda"
-
-@llvm.compiler.used = appending global [1 x i8*] [i8* bitcast (void ()* @dropped_without_root to i8*)], section "llvm.metadata"
 
 define void @dropped_without_root() {
 entry:
@@ -539,15 +537,17 @@ entry:
     #[ignore = "requires discoverable CUDA Toolkit libNVVM, nvJitLink, and libdevice"]
     fn live_expected_kernel_root_prevents_a_successful_empty_link() {
         let finalizer = Finalizer::discover().unwrap();
-        let options = FinalizationOptions::new("sm_86".parse().unwrap());
+        let target = "sm_86".parse().unwrap();
+        let compile_options = FinalizationOptions::new(target).with_debug_policy(DebugPolicy::Full);
+        let link_options = FinalizationOptions::new(target);
         let ltoir = finalizer
             .compiler()
-            .compile_nvvm_ir_to_ltoir("unrooted.ll", UNROOTED_LEGACY_NVVM_IR, &options)
+            .compile_nvvm_ir_to_ltoir("unrooted.ll", UNROOTED_LEGACY_NVVM_IR, &compile_options)
             .unwrap();
         let input = [NamedInput::new("unrooted.ltoir", &ltoir)];
 
         let unguarded = finalizer
-            .link_ltoir(&input, &options, FinalizerOutput::Cubin)
+            .link_ltoir(&input, &link_options, FinalizerOutput::Cubin)
             .expect("nvJitLink reports success even after dropping the kernel");
         assert!(is_valid_cubin(&unguarded));
         assert!(
@@ -561,7 +561,7 @@ entry:
             .link_ltoir_with_expected_kernels(
                 &input,
                 &["dropped_without_root"],
-                &options,
+                &link_options,
                 FinalizerOutput::Cubin,
             )
             .expect("-kernels-used must retain the expected entry");
