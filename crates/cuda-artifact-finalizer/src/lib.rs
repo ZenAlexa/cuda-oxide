@@ -515,18 +515,18 @@ entry:
 !1 = !{i32 2, i32 0, i32 3, i32 1}
 "#;
 
-    /// A retained kernel that calls a deliberately unresolved device symbol.
-    /// Without a host root nvJitLink can discard the whole offending module and
-    /// report success; `-kernels-used` makes the unresolved call observable.
-    const UNRESOLVED_DEVICE_CALL_NVVM_IR: &[u8] = br#"
+    /// A retained kernel that calls the public device-side `cudaGraphLaunch`
+    /// symbol without linking libcudadevrt. nvJitLink can discard the whole
+    /// offending module and report success unless the kernel is a link root.
+    const MISSING_DEVICE_RUNTIME_NVVM_IR: &[u8] = br#"
 target datalayout = "e-p:64:64:64-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64-i128:128:128-f32:32:32-f64:64:64-v16:16:16-v32:32:32-v64:64:64-v128:128-n16:32:64"
 target triple = "nvptx64-nvidia-cuda"
 
-declare i32 @missing_device_runtime()
+declare i32 @cudaGraphLaunch(i8*, i8*)
 
 define void @dropped_without_required_library() {
 entry:
-  %status = call i32 @missing_device_runtime()
+  %status = call i32 @cudaGraphLaunch(i8* null, i8* null)
   ret void
 }
 
@@ -547,7 +547,7 @@ entry:
             .compiler()
             .compile_nvvm_ir_to_ltoir(
                 "unresolved-device-call.ll",
-                UNRESOLVED_DEVICE_CALL_NVVM_IR,
+                MISSING_DEVICE_RUNTIME_NVVM_IR,
                 &link_options,
             )
             .unwrap();
