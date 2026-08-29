@@ -515,11 +515,14 @@ entry:
 !1 = !{i32 2, i32 0, i32 3, i32 1}
 "#;
 
-    /// Same annotated kernel without `@llvm.used`. libNVVM emits LTOIR, but an
-    /// unrooted nvJitLink operation succeeds with an empty final image.
+    /// Same annotated kernel held through libNVVM by `@llvm.compiler.used`.
+    /// Unlike `@llvm.used`, that intrinsic still permits the linker to discard
+    /// the symbol, so this isolates nvJitLink's final-root contract.
     const UNROOTED_LEGACY_NVVM_IR: &[u8] = br#"
 target datalayout = "e-p:64:64:64-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64-i128:128:128-f32:32:32-f64:64:64-v16:16:16-v32:32:32-v64:64:64-v128:128-n16:32:64"
 target triple = "nvptx64-nvidia-cuda"
+
+@llvm.compiler.used = appending global [1 x i8*] [i8* bitcast (void ()* @dropped_without_root to i8*)], section "llvm.metadata"
 
 define void @dropped_without_root() {
 entry:
