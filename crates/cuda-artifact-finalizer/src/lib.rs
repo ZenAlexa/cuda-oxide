@@ -527,10 +527,11 @@ entry:
             .link_ltoir(&input, &link_options, FinalizerOutput::Cubin)
             .expect("nvJitLink reports success even after dropping the kernel");
         assert!(is_valid_cubin(&unguarded));
+        let unguarded_entries = crate::validation::cubin_kernel_entries(&unguarded)
+            .expect("the unguarded cubin has a readable symbol inventory");
+        eprintln!("unguarded entries: {unguarded_entries:?}");
         assert!(
-            crate::validation::cubin_kernel_entries(&unguarded)
-                .expect("the unguarded cubin has a readable symbol inventory")
-                .is_empty(),
+            unguarded_entries.is_empty(),
             "the negative fixture must reproduce nvJitLink's successful empty output"
         );
 
