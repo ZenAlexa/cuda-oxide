@@ -515,26 +515,33 @@ entry:
 !1 = !{i32 2, i32 0, i32 3, i32 1}
 "#;
 
-    /// Device `malloc`/`free` calls following NVIDIA's libNVVM syscall sample.
-    /// `@llvm.used` keeps the kernel through libNVVM so only nvJitLink decides
-    /// whether the missing device-runtime implementation makes it observable.
+    /// Device `cudaMalloc` lowered to CUDA 13.3's private CDP2 endpoint.
+    ///
+    /// The public header routes the device overload through
+    /// `__cudaCDP2Malloc`, which is implemented by `libcudadevrt.a`.
+    /// `@llvm.used` keeps the kernel through libNVVM so the final link is the
+    /// first stage allowed to discard the unresolved entry.
     const MISSING_DEVICE_RUNTIME_NVVM_IR: &[u8] = br#"
-target datalayout = "e-p:64:64:64-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64-i128:128:128-f32:32:32-f64:64:64-v16:16:16-v32:32:32-v64:64:64-v128:128-n16:32:64"
+target datalayout = "e-p:64:64:64-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64-i128:128:128-f32:32:32-f64:64:64-v16:16:16-v32:32-v64:64-v128:128-n16:32:64"
 target triple = "nvptx64-nvidia-cuda"
-
-@allocation = internal addrspace(1) global i32* null, align 8
 
 define void @dropped_without_required_library() {
 entry:
-  %raw = tail call i8* @malloc(i64 128)
-  %typed = bitcast i8* %raw to i32*
-  store i32* %typed, i32* addrspace(1)* @allocation, align 8
-  tail call void @free(i8* %raw)
+  %allocation = alloca i8*, align 8
+  %status = call i32 @__cudaCDP2Malloc(i8** %allocation, i64 128)
+  %failed = icmp ne i32 %status, 0
+  br i1 %failed, label %done, label %clear
+
+clear:
+  %pointer = load i8*, i8** %allocation, align 8
+  store i8 0, i8* %pointer, align 1
+  br label %done
+
+done:
   ret void
 }
 
-declare noalias i8* @malloc(i64) nounwind
-declare void @free(i8* nocapture) nounwind
+declare i32 @__cudaCDP2Malloc(i8**, i64)
 
 @llvm.used = appending global [1 x i8*] [i8* bitcast (void ()* @dropped_without_required_library to i8*)], section "llvm.metadata"
 
