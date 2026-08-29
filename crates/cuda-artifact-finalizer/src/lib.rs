@@ -555,7 +555,7 @@ declare i32 @__cudaCDP2Malloc(i8**, i64)
     #[ignore = "requires discoverable CUDA Toolkit libNVVM, nvJitLink, and libdevice"]
     fn live_expected_kernel_root_rejects_a_successful_empty_link() {
         let finalizer = Finalizer::discover().unwrap();
-        let link_options = FinalizationOptions::new("sm_86".parse().unwrap());
+        let link_options = FinalizationOptions::new("sm_120a".parse().unwrap());
         let ltoir = finalizer
             .compiler()
             .compile_nvvm_ir_to_ltoir(
