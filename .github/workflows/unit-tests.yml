@@ -25,6 +25,7 @@ jobs:
         with:
           cuda: "13.1.1"
           method: network
+          sub-packages: '["nvcc"]'
           non-cuda-sub-packages: '["libnvvm", "libnvjitlink"]'
 
       - name: Reproduce and prevent a successful empty link

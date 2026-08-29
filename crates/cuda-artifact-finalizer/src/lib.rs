@@ -538,7 +538,8 @@ entry:
     fn live_expected_kernel_root_prevents_a_successful_empty_link() {
         let finalizer = Finalizer::discover().unwrap();
         let target = "sm_86".parse().unwrap();
-        let compile_options = FinalizationOptions::new(target).with_debug_policy(DebugPolicy::Full);
+        let compile_options =
+            FinalizationOptions::new(target.clone()).with_debug_policy(DebugPolicy::Full);
         let link_options = FinalizationOptions::new(target);
         let ltoir = finalizer
             .compiler()
