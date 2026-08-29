@@ -11,6 +11,31 @@ permissions:
   contents: read
 
 jobs:
+  live-finalizer-kernel-retention:
+    name: live nvJitLink kernel-retention regression
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Clone repository
+        uses: actions/checkout@v4
+
+      - name: Install libNVVM and nvJitLink
+        uses: Jimver/cuda-toolkit@v0.2.35
+        id: cuda-toolkit
+        with:
+          cuda: "13.1.1"
+          method: network
+          sub-packages: '["nvvm"]'
+          non-cuda-sub-packages: '["libnvjitlink"]'
+
+      - name: Reproduce and prevent a successful empty link
+        env:
+          CUDA_TOOLKIT_PATH: ${{ steps.cuda-toolkit.outputs.CUDA_PATH }}
+        run: >-
+          cargo test -p cuda-artifact-finalizer
+          live_tests::live_expected_kernel_root_prevents_a_successful_empty_link
+          -- --ignored --exact --nocapture
+
   rust-unit-tests:
     name: cargo test -p ${{ matrix.package }}
     runs-on: ubuntu-latest
