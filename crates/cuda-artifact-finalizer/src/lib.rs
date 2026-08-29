@@ -537,14 +537,8 @@ entry:
     #[ignore = "requires discoverable CUDA Toolkit libNVVM, nvJitLink, and libdevice"]
     fn live_expected_kernel_root_prevents_a_successful_empty_link() {
         let finalizer = Finalizer::discover().unwrap();
-        let target: CudaArch = "sm_86".parse().unwrap();
-        let compile_options =
-            FinalizationOptions::new(target.clone()).with_debug_policy(DebugPolicy::Full);
-        let link_options = FinalizationOptions::new(target);
-        let ltoir = finalizer
-            .compiler()
-            .compile_nvvm_ir_to_ltoir("unrooted.ll", UNROOTED_LEGACY_NVVM_IR, &compile_options)
-            .unwrap();
+        let link_options = FinalizationOptions::new("sm_86".parse().unwrap());
+        let ltoir = std::fs::read(std::env::var_os("CUDA_OXIDE_TEST_LTOIR").unwrap()).unwrap();
         let input = [NamedInput::new("unrooted.ltoir", &ltoir)];
 
         let unguarded = finalizer

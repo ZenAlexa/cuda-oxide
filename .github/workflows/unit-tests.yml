@@ -31,10 +31,16 @@ jobs:
       - name: Reproduce and prevent a successful empty link
         env:
           CUDA_TOOLKIT_PATH: ${{ steps.cuda-toolkit.outputs.CUDA_PATH }}
-        run: >-
-          cargo test -p cuda-artifact-finalizer
-          live_tests::live_expected_kernel_root_prevents_a_successful_empty_link
-          -- --ignored --exact --nocapture
+        run: |
+          cat > /tmp/unrooted.cu <<'EOF'
+          extern "C" __global__ void dropped_without_root() {}
+          EOF
+          "${CUDA_TOOLKIT_PATH}/bin/nvcc" -dlto -arch=sm_86 --ltoir \
+            /tmp/unrooted.cu -o /tmp/unrooted.ltoir
+          CUDA_OXIDE_TEST_LTOIR=/tmp/unrooted.ltoir \
+            cargo test -p cuda-artifact-finalizer \
+              live_tests::live_expected_kernel_root_prevents_a_successful_empty_link \
+              -- --ignored --exact --nocapture
 
   rust-unit-tests:
     name: cargo test -p ${{ matrix.package }}
