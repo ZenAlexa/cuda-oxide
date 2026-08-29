@@ -515,12 +515,48 @@ entry:
 !1 = !{i32 2, i32 0, i32 3, i32 1}
 "#;
 
+    /// Device `malloc`/`free` calls following NVIDIA's libNVVM syscall sample.
+    /// `@llvm.used` keeps the kernel through libNVVM so only nvJitLink decides
+    /// whether the missing device-runtime implementation makes it observable.
+    const MISSING_DEVICE_RUNTIME_NVVM_IR: &[u8] = br#"
+target datalayout = "e-p:64:64:64-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64-i128:128:128-f32:32:32-f64:64:64-v16:16:16-v32:32:32-v64:64:64-v128:128-n16:32:64"
+target triple = "nvptx64-nvidia-cuda"
+
+@allocation = internal addrspace(1) global i32* null, align 8
+
+define void @dropped_without_required_library() {
+entry:
+  %raw = tail call i8* @malloc(i64 128)
+  %typed = bitcast i8* %raw to i32*
+  store i32* %typed, i32* addrspace(1)* @allocation, align 8
+  tail call void @free(i8* %raw)
+  ret void
+}
+
+declare noalias i8* @malloc(i64) nounwind
+declare void @free(i8* nocapture) nounwind
+
+@llvm.used = appending global [1 x i8*] [i8* bitcast (void ()* @dropped_without_required_library to i8*)], section "llvm.metadata"
+
+!nvvm.annotations = !{!0}
+!nvvmir.version = !{!1}
+!0 = !{void ()* @dropped_without_required_library, !"kernel", i32 1}
+!1 = !{i32 2, i32 0, i32 3, i32 1}
+"#;
+
     #[test]
-    #[ignore = "requires CUDA Toolkit nvcc, libNVVM, nvJitLink, and libdevice"]
+    #[ignore = "requires discoverable CUDA Toolkit libNVVM, nvJitLink, and libdevice"]
     fn live_expected_kernel_root_rejects_a_successful_empty_link() {
         let finalizer = Finalizer::discover().unwrap();
         let link_options = FinalizationOptions::new("sm_86".parse().unwrap());
-        let ltoir = std::fs::read(std::env::var_os("CUDA_OXIDE_TEST_LTOIR").unwrap()).unwrap();
+        let ltoir = finalizer
+            .compiler()
+            .compile_nvvm_ir_to_ltoir(
+                "missing-device-runtime.ll",
+                MISSING_DEVICE_RUNTIME_NVVM_IR,
+                &link_options,
+            )
+            .unwrap();
         let input = [NamedInput::new("missing-device-runtime.ltoir", &ltoir)];
 
         let unguarded = finalizer
